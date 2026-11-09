@@ -3,7 +3,7 @@
 ## 建仓
 
 - [x] 目录、README、AGENTS、NOTES、设计文档（2026-11-09）
-- [ ] 建远端仓库（gitee `charsen/moo-ios-monitor`，与其它 monitor 仓一致）并推送首个提交
+- [ ] 建远端仓库（gitee `charsen/moo-monitor-ios`，与其它 monitor 仓一致）并推送首个提交
 - [ ] `Package.swift` 骨架：`MooMonitorCrash`（C）+ `MooMonitor`（Swift）+ 空测试，`swift test` 通过
 
 ## M1（未开工）

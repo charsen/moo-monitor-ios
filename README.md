@@ -1,8 +1,8 @@
-# Moo iOS Monitor
+# moo-monitor-ios
 
 iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、脏退出推断、主线程卡死，落盘后批量上报到 [Moo Scaffold Cloud](https://c.mooeen.com)。
 
-与 `moo-monitor-laravel`（PHP）、`moo-go-monitor`（Go）、`moo-monitor-vue`（浏览器）、`moo-android-monitor`（Android）同属一套监控体系，共用 cloud 的 intake 契约。
+与 `moo-monitor-laravel`（PHP）、`moo-go-monitor`（Go）、`moo-monitor-vue`（浏览器）、`moo-monitor-android`（Android）同属一套监控体系，共用 cloud 的 intake 契约。
 
 ## 状态
 
@@ -51,6 +51,6 @@ token 为空时 SDK 整体禁用，不发任何请求。
 
 ## 仓库与许可
 
-双远端：gitee `charsen/moo-ios-monitor`（主）、GitHub `charsen/moo-ios-monitor`（镜像）。
+双远端：gitee `charsen/moo-monitor-ios`（主）、GitHub `charsen/moo-monitor-ios`（镜像）。
 
 MIT，见 [`LICENSE`](LICENSE)。

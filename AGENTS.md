@@ -1,11 +1,11 @@
-# Moo iOS Monitor 协作与编码要求
+# moo-monitor-ios 协作与编码要求
 
 > 规则来源：通用协作、授权、Git 与测试规则见 `~/.agents/AGENTS.md`（每轮自动加载）。本文件只写本仓特有约束，不复制全局规则；冲突时以本文件为准。
 
 ## 项目职责
 
 - iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、脏退出推断、主线程卡死，落盘后批量上报到 Moo Scaffold Cloud。
-- 与 `moo-monitor-laravel` / `moo-go-monitor` / `moo-monitor-vue` / `moo-android-monitor` 同属一套体系，共用 cloud 的 intake 契约；**不在本仓另写一份契约**，上报格式以 `moo-scaffold-cloud/docs/app-monitor.md` 为准。
+- 与 `moo-monitor-laravel` / `moo-go-monitor` / `moo-monitor-vue` / `moo-monitor-android` 同属一套体系，共用 cloud 的 intake 契约；**不在本仓另写一份契约**，上报格式以 `moo-scaffold-cloud/docs/app-monitor.md` 为准。
 - SwiftPM 包，宿主只通过 `MooMonitor` 门面与 `MonitorConfig` 交互。
 
 ## 采集红线

@@ -1,10 +1,10 @@
-# 设计：Moo iOS Monitor
+# 设计：moo-monitor-ios
 
 > 上报契约以 `moo-scaffold-cloud/docs/app-monitor.md` 为准（数据表、指纹、count 语义、端点与能力）。本文只写 SDK 侧的采集、符号化、落盘、上报与边界。
 
 ## 1. 定位
 
-iOS / iPadOS 的进程内异常采集库。与 `moo-android-monitor` 对齐同一份上报格式，云端不区分语言。
+iOS / iPadOS 的进程内异常采集库。与 `moo-monitor-android` 对齐同一份上报格式，云端不区分语言。
 
 不做的事：
 
