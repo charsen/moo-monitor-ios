@@ -86,14 +86,15 @@ typedef struct {
     uint64_t thread_id;
     uint32_t depth;
     uint32_t image_count;
-    uint64_t addresses[64];
+    uint64_t offsets[64];      // 相对所在 image 基址的偏移，不是绝对地址
+    uint8_t  image_index[64];  // 每个 offset 属于哪个 image
     uint8_t  image_uuids[16][16];
-    uint64_t image_bases[16];
 } moo_crash_frame;
 ```
 
-- `moo_crash_install(path)`：`open(path, O_WRONLY|O_CREAT|O_APPEND, 0600)`，fd 常驻，结构体放静态区。
-- `moo_crash_handle(sig)`：`memset` → 填 `sig` / 时间 / 线程 → `backtrace()` 取 64 个地址 → 遍历 `_dyld_image_count` 取 UUID 与基址 → 一次 `write` → `signal(sig, SIG_DFL); raise(sig);`。
+- `moo_crash_install(path)`：`open(path, O_WRONLY|O_CREAT|O_APPEND, 0600)`，fd 常驻，结构体放静态区；同时把当前 image 表（UUID + 基址）缓存到静态数组。
+- `moo_crash_handle(sig)`：`memset` → 填 `sig` / 时间 / 线程 → `backtrace()` 取 64 个地址 → 用**缓存**的 image 表算 offset 与 image_index → 一次 `write` → `signal(sig, SIG_DFL); raise(sig);`。
+- 处理器里不调用 `_dyld_image_count` / `_dyld_get_image_header`：dyld 内部有锁，信号恰好落在持锁线程会死锁。image 表只在启动时取一次。
 - `backtrace()` 在信号上下文里属于「事实标准但非 POSIX 保证」，这是所有进程内采集器共同的取舍，不假装没有。
 
 ### 4.2 NSException
@@ -104,18 +105,26 @@ typedef struct {
 
 崩溃帧在**下次启动**才变成完整记录，分两步：
 
-1. **崩溃时**（C）：只落原始地址 + image UUID + 基址，几十字节到 1KB。
-2. **下次启动**（Swift）：读帧 → 逐地址 `dladdr` 取符号 → `swift_demangle` 还原 Swift 名 → 组装完整 JSON 进队列。
+1. **崩溃时**（C）：落 `offset = address - image_base` 与 `image_uuid`，不存绝对地址，几十字节到 1KB。
+2. **下次启动**（Swift）：按 UUID 找回当前进程里同一个 image 的基址，`runtime_addr = new_base + offset`，再 `dladdr` 取符号 → `swift_demangle` 还原 Swift 名 → 组装完整 JSON 进队列。
+
+**为什么不能直接存绝对地址**：iOS 每次启动都做 ASLR，同一函数在新进程里的绝对地址和上次完全不同。把崩溃时的绝对地址拿到下次启动去 `dladdr`，命中的是随机内存，轻则取不到符号，重则读到别人的镜像区间、给出一个看起来很像真的错误函数名——比没有符号更糟。
 
 ```swift
+// 崩溃时（C）：只记相对基址的偏移
+frame.offsets[i] = address - image_bases[imageIndex];
+memcpy(frame.image_uuids[imageIndex], uuid, 16);
+
+// 下次启动（Swift）：按 UUID 找回当前基址，再加偏移
+guard let base = currentImageBase(uuid: frame.imageUUIDs[i]) else { continue }
+let addr = base + frame.offsets[i]
 var info = Dl_info()
-guard dladdr(UnsafeRawPointer(bitPattern: address), &info) != 0 else { continue }
+guard dladdr(UnsafeRawPointer(bitPattern: addr), &info) != 0 else { continue }
 let name = info.dli_sname.map { String(cString: $0) } ?? "<unknown>"
 let pretty = demangle(name) ?? name
-let offset = address - UInt(bitPattern: info.dli_saddr)
 ```
 
-`app = true`：地址落在主可执行文件的 image 区间内（按 `LC_UUID` 匹配）。
+`app = true`：`image_uuid` 等于主可执行文件的 `LC_UUID`。
 
 **没有行号。** 行号在 dSYM 里，设备上不解析 DWARF——那是几十 MB 的解析，启动时做不起。M3 用 Mac 上的 `atos` 补。
 
@@ -153,7 +162,7 @@ let offset = address - UInt(bitPattern: info.dli_saddr)
 | `session.json` | 脏退出标记 |
 
 - 队列上限 200 条 / 2MB，超限保留最后 150 条并累加 `dropped`。
-- `crash.bin` 上限 20 帧，超了覆盖最旧的。
+- `crash.bin` 上限 20 帧，超了覆盖最旧的；同一指纹 1 小时内最多写 10 帧。坏版本「启动即崩」时没有这个闸，一小时内能写出上千条同一条崩溃。
 - 目录标 `isExcludedFromBackup = true`：这些数据不该进 iCloud 备份。
 
 ## 6. 上报
