@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MachO
 import MooMonitorCrash
 
 @_silgen_name("swift_demangle")
@@ -28,6 +29,7 @@ public enum FrameResolver {
         let offsets = withUnsafeBytes(of: frame.offsets) { Array($0.bindMemory(to: UInt64.self)) }
         let indexes = withUnsafeBytes(of: frame.image_index) { Array($0.bindMemory(to: UInt8.self)) }
 
+        let mainUUID = currentMainExecutableUUID()
         var out: [[String: Any]] = []
         out.reserveCapacity(depth)
 
@@ -45,7 +47,8 @@ public enum FrameResolver {
             var entry: [String: Any] = [
                 "function": demangle(raw) ?? raw,
                 "offset": Int(offsets[i]),
-                "app": index == 0,
+                // 不能假设 dyld image 0 永远是主可执行文件；用 LC_UUID 对主程序判定。
+                "app": !uuid.isEmpty && uuid == mainUUID,
             ]
             if let fname = info.dli_fname {
                 entry["image"] = (String(cString: fname) as NSString).lastPathComponent
@@ -65,6 +68,11 @@ public enum FrameResolver {
             guard start + 16 <= bytes.count else { return [] }
             return Array(bytes[start..<(start + 16)])
         }
+    }
+
+    private static func currentMainExecutableUUID() -> [UInt8] {
+        guard let header = _dyld_get_image_header(0) else { return [] }
+        return imageUUID(header)
     }
 
     private static func currentBase(forUUID uuid: [UInt8]) -> UInt? {

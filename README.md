@@ -1,12 +1,12 @@
 # moo-monitor-ios
 
-iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、脏退出推断、主线程卡死，落盘后批量上报到 [Moo Scaffold Cloud](https://c.mooeen.com)。
+iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、脏退出推断，落盘后批量上报到 [Moo Scaffold Cloud](https://c.mooeen.com)。主线程卡死（hang watchdog）在 M3。
 
 与 `moo-monitor-laravel`（PHP）、`moo-monitor-go`（Go）、`moo-monitor-vue`（浏览器）、`moo-monitor-android`（Android）同属一套监控体系，共用 cloud 的 intake 契约。
 
 ## 状态
 
-**M1 核心已实现（C 写盘 + Swift 侧，`swift test` 12 条通过），真机崩溃闭环待验。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
+**M1 已接入书禾 Apple，`swift test` 23 条通过；模拟器闭环已验证，真机「系统崩溃报告仍生成」红线待验。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
 
 ## 定位
 
@@ -23,7 +23,7 @@ import MooMonitor
 struct App: App {
     init() {
         MooMonitor.install(MonitorConfig(
-            endpoint: URL(string: "https://c.mooeen.com")!,
+            endpoint: "https://c.mooeen.com",
             token: Bundle.main.object(forInfoDictionaryKey: "MOOMonitorToken") as? String ?? "",
             release: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
             build: Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
@@ -32,7 +32,7 @@ struct App: App {
 }
 ```
 
-token 为空时 SDK 整体禁用，不发任何请求。
+宿主还需在 `scenePhase` 变化时调 `MooMonitor.enterForeground()` / `MooMonitor.enterBackground()`，在关键视图 `onAppear` 调 `MooMonitor.screen("ReaderView")`。token 为空时 SDK 整体禁用，不发任何请求。
 
 ## 文档
 
@@ -47,7 +47,7 @@ token 为空时 SDK 整体禁用，不发任何请求。
 
 ## 首个接入方
 
-书禾 Apple（`/Volumes/dev/wwwroot/shuhe-apple`）。
+书禾 Apple（`/Volumes/dev/wwwroot/shuhe-apple`）：Xcode 本地 package 引用 `../moo-monitor-ios`，`App/MonitorBridge.swift` 统一接线，`Inject Build Tokens` 脚本从 `/Volumes/dev/build_tokens` 注入 `MOOMonitorToken`。
 
 ## 仓库与许可
 

@@ -38,4 +38,48 @@ final class EventStoreTests: XCTestCase {
     func testCrashFramesEmptyWhenNoFile() {
         XCTAssertTrue(makeStore().crashFrames().isEmpty)
     }
+
+    func testMergesSameFingerprintAndKeepsNewEventId() {
+        let store = makeStore(maxRecords: 10)
+        let first = record(id: "first", count: 1)
+        let second = record(id: "second", count: 2)
+
+        XCTAssertTrue(store.appendMerged(first))
+        XCTAssertTrue(store.appendMerged(second))
+
+        let pending = store.pending(limit: 10)
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?["event_id"] as? String, "second")
+        XCTAssertEqual(pending.first?["count"] as? Int, 3)
+    }
+
+    func testDoesNotMergeDifferentFingerprint() {
+        let store = makeStore(maxRecords: 10)
+        store.appendMerged(record(id: "a", name: "Swift.fatalError"))
+        store.appendMerged(record(id: "b", name: "NSInvalidArgumentException"))
+
+        XCTAssertEqual(store.pending(limit: 10).count, 2)
+    }
+
+    func testFingerprintNormalizesAddressesAndNumbers() {
+        let one = record(id: "a", message: "bad at 0x1234abcd and 42")
+        let two = record(id: "b", message: "bad at 0xdeadbeef and 7")
+        XCTAssertEqual(EventStore.fingerprint(of: one), EventStore.fingerprint(of: two))
+    }
+
+    private func record(
+        id: String,
+        name: String = "Swift.fatalError",
+        message: String = "unexpectedly found nil",
+        count: Int = 1
+    ) -> [String: Any] {
+        [
+            "event_id": id,
+            "platform": "ios",
+            "kind": "crash",
+            "count": count,
+            "exception": ["name": name, "message": message],
+            "frames": [["function": "Shuhe.App.run", "app": true]],
+        ]
+    }
 }

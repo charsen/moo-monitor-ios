@@ -11,7 +11,9 @@ extern "C" {
 #define MOO_CRASH_MAGIC 0x4D4F4F43u  /* 'MOOC' */
 #define MOO_CRASH_VERSION 1
 #define MOO_CRASH_MAX_DEPTH 64
-#define MOO_CRASH_MAX_IMAGES 16
+#define MOO_CRASH_MAX_IMAGES 32
+/* image_index 的哨兵值：地址不属于启动时缓存的 image。 */
+#define MOO_CRASH_UNKNOWN_IMAGE 0xFF
 
 /*
  * 崩溃帧。只存相对所在 image 基址的偏移，不存绝对地址：
@@ -39,11 +41,17 @@ int moo_crash_install(const char *path);
 /* 从文件读回全部帧，返回写入 out 的条数（最多 max）。 */
 size_t moo_crash_read(const char *path, moo_crash_frame *out, size_t max);
 
+/* 只读最近 max 帧（坏版本可能把 crash.bin 写得很长）。 */
+size_t moo_crash_read_last(const char *path, moo_crash_frame *out, size_t max);
+
 /* 清空崩溃文件（并入队列后调用）。 */
 void moo_crash_reset(const char *path);
 
 /* 测试用：给定地址与 image 表算偏移；生产由 moo_crash_handle 内部调用。 */
 void moo_crash_handle(int sig);
+
+/* NSException 已由 Swift 侧落盘：紧随其后的 SIGABRT 不再重复写一帧。 */
+void moo_crash_skip_signal_after_exception(void);
 
 #ifdef __cplusplus
 }
