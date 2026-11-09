@@ -6,7 +6,7 @@ iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、�
 
 ## 状态
 
-**设计完成，代码未开工。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
+**M1 核心已实现（C 写盘 + Swift 侧，`swift test` 12 条通过），真机崩溃闭环待验。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
 
 ## 定位
 
