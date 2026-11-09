@@ -2,7 +2,7 @@
 
 iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、脏退出推断、主线程卡死，落盘后批量上报到 [Moo Scaffold Cloud](https://c.mooeen.com)。
 
-与 `moo-monitor-laravel`（PHP）、`moo-go-monitor`（Go）、`moo-monitor-vue`（浏览器）、`moo-monitor-android`（Android）同属一套监控体系，共用 cloud 的 intake 契约。
+与 `moo-monitor-laravel`（PHP）、`moo-monitor-go`（Go）、`moo-monitor-vue`（浏览器）、`moo-monitor-android`（Android）同属一套监控体系，共用 cloud 的 intake 契约。
 
 ## 状态
 
