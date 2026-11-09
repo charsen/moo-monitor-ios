@@ -49,6 +49,8 @@ token 为空时 SDK 整体禁用，不发任何请求。
 
 书禾 Apple（`/Volumes/dev/wwwroot/shuhe-apple`）。
 
-## 许可证
+## 仓库与许可
 
-MIT
+双远端：gitee `charsen/moo-ios-monitor`（主）、GitHub `charsen/moo-ios-monitor`（镜像）。
+
+MIT，见 [`LICENSE`](LICENSE)。
