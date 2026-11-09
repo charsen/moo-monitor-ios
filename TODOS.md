@@ -21,8 +21,8 @@
 - [x] 单测：EventStore / Redactor / Uploader / SessionMarker（23 条）
 - [x] 书禾 Apple 接入：本地 package、门面调用、生命周期与界面名、token 注入
 - [x] 模拟器闭环：`fatalError` → 下次启动还原帧；NSException 只产一条；mock intake 200 清队列
-- [ ] 真机：`fatalError`、强制解包 nil、上滑强杀三条闭环
-- [ ] 真机：确认系统崩溃报告仍生成（红线，不通过不算完成）
+- [ ] **2026-11-10 真机**：`fatalError`、强制解包 nil、上滑强杀三条闭环（用户指定明天）
+- [ ] **2026-11-10 真机**：确认系统崩溃报告仍生成（红线，不通过不算完成）
 - [x] cloud 侧 M1 代码已落地；生产 `/api/v1/app-errors/intake` 无 token 返回 401，有效 token 写入与后台列表待验
 
 ## M2
