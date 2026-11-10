@@ -2,6 +2,32 @@ import XCTest
 @testable import MooMonitor
 
 final class RedactorTests: XCTestCase {
+    func testSharedCrossSDKCorpus() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "cross-sdk-redaction", withExtension: "json", subdirectory: "Fixtures"))
+        let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        for row in fixture["cases"] as! [[String: Any]] {
+            let out = Redactor.scrub(row["input"] as? String) ?? ""
+            for secret in row["forbidden"] as! [String] { XCTAssertFalse(out.contains(secret), row["name"] as! String) }
+            XCTAssertTrue(out.contains(row["keep"] as! String), row["name"] as! String)
+        }
+    }
+
+    func testRedactsWholeCredentialBeforeOutputAndPayloadLimits() {
+        let jwt = "eyJ" + String(repeating: "A", count: 40_000) + ".payload.signature"
+        XCTAssertFalse((Redactor.scrub(jwt) ?? "").contains("eyJAAA"))
+        let shortJWT = "eyJ" + String(repeating: "A", count: 3_000) + ".payload.signature"
+        let data = Redactor.payload(["note": shortJWT, "key " + shortJWT: "ok"])
+        XCTAssertFalse(String(describing: data).contains("eyJAAA"))
+        XCTAssertEqual(Redactor.scrub(String(repeating: "x", count: 65_537)), "[truncated]")
+    }
+
+    func testEscapedQuotedCredentialsDoNotExposeTheirTail() {
+        let text = #"password="first \"second\" final-secret" keep=visible"#
+        let out = Redactor.scrub(text) ?? ""
+        XCTAssertFalse(out.contains("final-secret"))
+        XCTAssertTrue(out.contains("keep=visible"))
+    }
+
     func testShortCredentialsAndPrivateFilenameAreRemoved() {
         let out = Redactor.scrub("token=short pwd: tiny Bearer abc.def.ghi file:///private/var/book title.epub")!
         XCTAssertFalse(out.contains("short"))

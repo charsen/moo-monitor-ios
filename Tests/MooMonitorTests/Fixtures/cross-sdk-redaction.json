@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "keys": [
+    "password",
+    "token",
+    "secret",
+    "authorization"
+  ],
+  "cases": [
+    {
+      "name": "double-quoted",
+      "input": "password=\"first second final-secret\" keep=visible",
+      "forbidden": [
+        "first second",
+        "final-secret"
+      ],
+      "keep": "keep=visible"
+    },
+    {
+      "name": "single-prefixed",
+      "input": "db_password='first second final-secret' keep=visible",
+      "forbidden": [
+        "first second",
+        "final-secret"
+      ],
+      "keep": "keep=visible"
+    },
+    {
+      "name": "escaped-quoted",
+      "input": "{\"access_token\":\"first \\\"second\\\" final-secret\"} keep=visible",
+      "forbidden": [
+        "final-secret"
+      ],
+      "keep": "keep=visible"
+    },
+    {
+      "name": "quoted-delimiters",
+      "input": "secret=\"first, second; final-secret\" keep=visible",
+      "forbidden": [
+        "final-secret"
+      ],
+      "keep": "keep=visible"
+    },
+    {
+      "name": "bare-jwt",
+      "input": "credential eyJhbGciOiJub25lIn0.eyJzdWIiOiJmaXh0dXJlIn0.Zml4dHVyZQ keep=visible",
+      "forbidden": [
+        "eyJhbGci",
+        "Zml4dHVyZQ"
+      ],
+      "keep": "keep=visible"
+    },
+    {
+      "name": "source-identity",
+      "input": "com.example.ReaderSelectionCoordinatorWithLongClassName.persistCurrentSelection2",
+      "forbidden": [],
+      "keep": "com.example.ReaderSelectionCoordinatorWithLongClassName.persistCurrentSelection2"
+    }
+  ]
+}

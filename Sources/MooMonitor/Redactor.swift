@@ -1,10 +1,10 @@
 import Foundation
 
-/// 先限制输入/遍历预算，再脱敏；不能为了截断 payload 先展开巨大共享对象图。
+/// 遍历和扫描均有上限；在预算内先脱敏，再做字段截断，避免切坏凭据后漏掉残段。
 enum Redactor {
     private static let rules: [(NSRegularExpression, String)] = [
         (#"(?i)\b(?:bearer)\s+[^\s,;]+"#, "Bearer ***"),
-        (#"(?i)((?<![A-Za-z0-9])(?:password|passwd|pwd|pass|token|secret|api[_-]?key|authorization|signature|sig|cookie|credential)\b\s*["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,"']+)"#, "$1***"),
+        (#"(?i)((?<![A-Za-z0-9])(?:password|passwd|pwd|pass|token|secret|api[_-]?key|authorization|signature|sig|cookie|credential)\b\s*["']?\s*[=:]\s*)(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|[^\s&;,"']+)"#, "$1***"),
         (#"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#, "[jwt]"),
         (#"(?i)(?:https?|file|content)://[^\r\n]+"#, "[url]"),
         (#"(?:/private)?/var/mobile/Containers/[^\r\n]+|/Users/[^\r\n]+|/private/var/[^\r\n]+"#, "~/[path]"),
@@ -14,11 +14,18 @@ enum Redactor {
 
     static func scrub(_ value: String?) -> String? {
         guard let value else { return nil }
-        var out = truncate(value, bytes: 32 * 1024)
+        var out = value
+        let units = value.utf16.prefix(65_537)
+        if units.count > 65_536 {
+            // 只保留完整栈行；截口所在整行省略，不把半枚凭据交给正则。
+            let prefix = String(decoding: units.prefix(65_536), as: UTF16.self)
+            guard let boundary = prefix.lastIndex(of: "\n") else { return "[truncated]" }
+            out = String(prefix[..<boundary]) + "\n[truncated]"
+        }
         for (regex, replacement) in rules {
             out = regex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: replacement)
         }
-        return out
+        return truncate(out, bytes: 32 * 1024)
     }
 
     static func truncate(_ value: String, bytes: Int) -> String {
@@ -45,7 +52,7 @@ enum Redactor {
         guard nodes > 0, strings > 0, depth <= 4 else { return "[truncated]" }
         nodes -= 1
         if let text = input as? String {
-            let out = scrub(truncate(text, bytes: min(strings, 2048))) ?? ""
+            let out = truncate(scrub(text) ?? "", bytes: min(strings, 2048))
             strings -= out.utf8.count
             return out
         }
@@ -57,7 +64,7 @@ enum Redactor {
             var result: [String: Any] = [:]
             for (key, item) in object.prefix(16) {
                 guard nodes > 0, strings > 0 else { break }
-                let cleanKey = scrub(truncate(key, bytes: min(strings, 64))) ?? ""
+                let cleanKey = truncate(scrub(key) ?? "", bytes: min(strings, 64))
                 strings -= cleanKey.utf8.count
                 let range = NSRange(key.startIndex..., in: key)
                 result[cleanKey] = secretKey.firstMatch(in: key, range: range) != nil ? "***" : value(item, depth: depth + 1, nodes: &nodes, strings: &strings)
