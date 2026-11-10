@@ -1,6 +1,8 @@
 #include "include/moo_crash_writer.h"
 
-#include <execinfo.h>
+#include <sys/ucontext.h>
+#include <errno.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -19,13 +21,14 @@
  */
 
 static int g_fd = -1;
+static volatile sig_atomic_t g_enabled = 1;
 static moo_crash_frame g_frame;
 static uintptr_t g_image_bases[MOO_CRASH_MAX_IMAGES];
 static uintptr_t g_image_ends[MOO_CRASH_MAX_IMAGES];
 /* UUID 必须单独缓存：g_frame 每次崩溃都会 memset，直接写在 g_frame 里会被清掉。 */
 static uint8_t g_image_uuids[MOO_CRASH_MAX_IMAGES][16];
 static uint32_t g_image_count = 0;
-static volatile sig_atomic_t g_handling = 0;
+static atomic_flag g_handling = ATOMIC_FLAG_INIT;
 /* ObjC 未捕获异常最后会 abort() 成 SIGABRT；Swift 侧既然已经落盘，就别再写一条。 */
 static volatile sig_atomic_t g_exception_captured = 0;
 
@@ -53,15 +56,25 @@ static uintptr_t image_end_for(const struct mach_header *header, intptr_t slide)
     return end;
 }
 
+static void capture_signal(int sig, siginfo_t *info, void *context);
+
 int moo_crash_install(const char *path) {
     if (path == NULL) {
         return -1;
     }
+    if (g_fd >= 0) { return -1; }
     g_fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (g_fd < 0) {
         return -1;
     }
-    g_handling = 0;
+    struct stat existing;
+    if (fstat(g_fd, &existing) == 0 && existing.st_size % sizeof(moo_crash_frame) != 0) {
+        if (ftruncate(g_fd, existing.st_size - existing.st_size % sizeof(moo_crash_frame)) != 0) {
+            close(g_fd); g_fd = -1; return -1;
+        }
+    }
+    g_enabled = 1;
+    atomic_flag_clear_explicit(&g_handling, memory_order_relaxed);
     g_exception_captured = 0;
 
     // image 表只在启动时取一次：_dyld_image_count / _dyld_get_image_header 内部有锁，
@@ -94,7 +107,12 @@ int moo_crash_install(const char *path) {
     // 六个致命信号：Swift 的 fatalError 走 SIGTRAP/SIGILL，ObjC 异常走 SIGABRT。
     const int signals[] = {SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP};
     for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
-        signal(signals[i], moo_crash_handle);
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        sigemptyset(&action.sa_mask);
+        action.sa_sigaction = capture_signal;
+        action.sa_flags = SA_SIGINFO;
+        if (sigaction(signals[i], &action, NULL) != 0) { return -1; }
     }
 
     return 0;
@@ -114,66 +132,54 @@ void moo_crash_skip_signal_after_exception(void) {
     g_exception_captured = 1;
 }
 
-void moo_crash_handle(int sig) {
-    if (g_exception_captured) {
-        signal(sig, SIG_DFL);
-        raise(sig);
-        return;
-    }
-    // 处理过程中再次触发（例如 backtrace 自己出错）：立刻交还系统，不递归写。
-    if (g_handling) {
-        signal(sig, SIG_DFL);
-        raise(sig);
-        return;
-    }
-    g_handling = 1;
+void moo_crash_set_enabled(int enabled) { g_enabled = enabled != 0; }
 
-    if (g_fd < 0) {
-        signal(sig, SIG_DFL);
-        raise(sig);
-        return;
-    }
-
-    memset(&g_frame, 0, sizeof(g_frame));
-    memcpy(g_frame.image_uuids, g_image_uuids, sizeof(g_image_uuids));
-    g_frame.magic = MOO_CRASH_MAGIC;
-    g_frame.version = MOO_CRASH_VERSION;
-    g_frame.kind = 1;
-    g_frame.sig = sig;
-    g_frame.image_count = g_image_count;
-    g_frame.thread_id = (uint64_t)(uintptr_t)pthread_self();
-
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    g_frame.timestamp_ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
-
-    void *frames[MOO_CRASH_MAX_DEPTH];
-    int depth = backtrace(frames, MOO_CRASH_MAX_DEPTH);
-    if (depth > 0) {
-        g_frame.depth = (uint32_t)depth;
-        for (int i = 0; i < depth; i++) {
-            uintptr_t addr = (uintptr_t)frames[i];
-            uint32_t idx = image_index_for(addr);
-            if (idx == MOO_CRASH_UNKNOWN_IMAGE) {
-                // 不属于启动时缓存的 image：没有 UUID 就无法跨启动还原，
-                // 留哨兵让读取端跳过，宁缺毋错。
-                g_frame.image_index[i] = MOO_CRASH_UNKNOWN_IMAGE;
-                g_frame.offsets[i] = 0;
-            } else {
-                g_frame.image_index[i] = (uint8_t)idx;
-                g_frame.offsets[i] = addr - g_image_bases[idx];
+/* 原始 fault PC 来自内核上下文，不能在 handler 里用 backtrace()/dyld/malloc 猜栈。
+ * arm64 额外保留 LR；不遍历可能损坏或不在当前线程范围内的栈内存。 */
+static void capture_signal(int sig, siginfo_t *info, void *context) {
+    int saved_errno = errno;
+    if (!g_exception_captured && g_enabled && g_fd >= 0 &&
+        !atomic_flag_test_and_set_explicit(&g_handling, memory_order_relaxed)) {
+        memset(&g_frame, 0, sizeof(g_frame));
+        memcpy(g_frame.image_uuids, g_image_uuids, sizeof(g_image_uuids));
+        g_frame.magic = MOO_CRASH_MAGIC;
+        g_frame.version = MOO_CRASH_VERSION;
+        g_frame.kind = 1;
+        g_frame.sig = sig;
+        g_frame.image_count = g_image_count;
+        struct timespec ts = {0};
+        clock_gettime(CLOCK_REALTIME, &ts);
+        g_frame.timestamp_ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+        uintptr_t addresses[2] = {0};
+        size_t count = 0;
+        ucontext_t *uc = (ucontext_t *)context;
+        if (uc != NULL && uc->uc_mcontext != NULL) {
+#if defined(__arm64__)
+            addresses[count++] = (uintptr_t)__darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss);
+            addresses[count++] = (uintptr_t)__darwin_arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+#elif defined(__x86_64__)
+            addresses[count++] = (uintptr_t)uc->uc_mcontext->__ss.__rip;
+#endif
+        }
+        for (size_t i = 0; i < count; i++) {
+            uint32_t idx = image_index_for(addresses[i]);
+            g_frame.image_index[i] = (uint8_t)idx;
+            if (idx != MOO_CRASH_UNKNOWN_IMAGE) {
+                g_frame.offsets[i] = addresses[i] - g_image_bases[idx];
             }
         }
+        g_frame.depth = (uint32_t)count;
+        ssize_t ignored = write(g_fd, &g_frame, sizeof(g_frame));
+        (void)ignored;
     }
-
-    // 一次写完，避免半条记录。
-    ssize_t ignored = write(g_fd, &g_frame, sizeof(g_frame));
-    (void)ignored;
-
-    // 恢复默认处理并重新抛出：系统照常生成崩溃报告，用户的崩溃对话框不受影响。
     signal(sig, SIG_DFL);
-    raise(sig);
+    errno = saved_errno;
+    /* 同步硬件 fault 返回原 PC 后由系统按原故障终止，保留原始现场。
+     * raise/abort 等用户产生的信号需要重新投递，否则返回后可能继续运行。 */
+    if (info == NULL || info->si_code <= 0 || sig == SIGABRT) { raise(sig); }
 }
+
+void moo_crash_handle(int sig) { capture_signal(sig, NULL, NULL); }
 
 size_t moo_crash_read(const char *path, moo_crash_frame *out, size_t max) {
     if (path == NULL || out == NULL || max == 0) {
@@ -188,9 +194,9 @@ size_t moo_crash_read(const char *path, moo_crash_frame *out, size_t max) {
     moo_crash_frame frame;
     while (count < max) {
         ssize_t n = read(fd, &frame, sizeof(frame));
-        if (n != (ssize_t)sizeof(frame) || frame.magic != MOO_CRASH_MAGIC) {
-            break;
-        }
+        if (n != (ssize_t)sizeof(frame)) { break; }
+        if (frame.magic != MOO_CRASH_MAGIC || frame.version != MOO_CRASH_VERSION ||
+            frame.depth > MOO_CRASH_MAX_DEPTH || frame.image_count > MOO_CRASH_MAX_IMAGES) { continue; }
         out[count++] = frame;
     }
     close(fd);
@@ -223,28 +229,27 @@ size_t moo_crash_read_last(const char *path, moo_crash_frame *out, size_t max) {
     moo_crash_frame frame;
     while (count < max) {
         ssize_t n = read(fd, &frame, sizeof(frame));
-        if (n != (ssize_t)sizeof(frame) || frame.magic != MOO_CRASH_MAGIC) {
-            break;
-        }
+        if (n != (ssize_t)sizeof(frame)) { break; }
+        if (frame.magic != MOO_CRASH_MAGIC || frame.version != MOO_CRASH_VERSION ||
+            frame.depth > MOO_CRASH_MAX_DEPTH || frame.image_count > MOO_CRASH_MAX_IMAGES) { continue; }
         out[count++] = frame;
     }
     close(fd);
     return count;
 }
 
-void moo_crash_reset(const char *path) {
+int moo_crash_reset(const char *path) {
     if (path == NULL) {
-        return;
+        return -1;
     }
-    g_handling = 0;
+    atomic_flag_clear_explicit(&g_handling, memory_order_relaxed);
     g_exception_captured = 0;
     if (g_fd >= 0) {
-        close(g_fd);
-        g_fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        /* fd 不失效，避免处理器撞进 close/open 窗口；原 fd 始终带 O_APPEND。 */
+        return ftruncate(g_fd, 0);
     } else {
-        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        if (fd >= 0) {
-            close(fd);
-        }
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+        if (fd >= 0) { close(fd); return 0; }
+        return -1;
     }
 }

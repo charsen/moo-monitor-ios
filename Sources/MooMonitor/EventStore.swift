@@ -1,24 +1,24 @@
 import Foundation
+import CryptoKit
 import MooMonitorCrash
 
-/// 落盘：`queue.jsonl`（待发记录）、`crash.bin`（定长崩溃帧）、`session.json`（脏退出标记）。
-/// 目录标 `isExcludedFromBackup`，这些数据不该进 iCloud 备份。
-public final class EventStore {
-
-    public let dir: URL
+/// 单进程队列。普通追加只写新行，重写用原子替换；崩溃文件始终独立。
+final class EventStore {
+    let dir: URL
     private let config: MonitorConfig
     private let lock = NSLock()
+    private struct Entry { let line: String; let record: [String: Any] }
+    private var entries: [Entry]?
+    private var bytes = 0
+    private var droppedValue: Int?
 
-    /// 队列上限 / 坏行 / 写失败累计。持久化，跨启动仍然可解释。
-    public var dropped: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return droppedLocked()
-    }
-
-    public init(directory: URL, config: MonitorConfig) {
-        self.dir = directory
-        self.config = config
+    init(directory: URL, config: MonitorConfig) {
+        dir = directory
+        var boundedConfig = config
+        boundedConfig.maxQueueRecords = min(200, max(1, config.maxQueueRecords))
+        boundedConfig.maxQueueBytes = min(2 * 1024 * 1024, max(1, config.maxQueueBytes))
+        boundedConfig.maxCrashRecords = min(20, max(1, config.maxCrashRecords))
+        self.config = boundedConfig
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
@@ -26,291 +26,236 @@ public final class EventStore {
         try? mutable.setResourceValues(values)
     }
 
-    public static func forApp(config: MonitorConfig) -> EventStore {
+    static func forApp(config: MonitorConfig) -> EventStore {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return EventStore(directory: base.appendingPathComponent("monitor", isDirectory: true), config: config)
     }
 
     private var queueURL: URL { dir.appendingPathComponent("queue.jsonl") }
-    private var crashURL: URL { dir.appendingPathComponent("crash.bin") }
     private var droppedURL: URL { dir.appendingPathComponent("dropped.txt") }
     private var disabledURL: URL { dir.appendingPathComponent("disabled.json") }
     private var retryURL: URL { dir.appendingPathComponent("retry.json") }
+    var crashPath: String { dir.appendingPathComponent("crash.bin").path }
 
-    // MARK: - 队列
-
-    /// 追加一条原始记录。队列内同指纹合并由 `appendMerged` 做；
-    /// 这里保留给测试和不需要合并的调用点。
-    public func append(_ record: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: record),
-              var line = String(data: data, encoding: .utf8) else {
-            lock.lock(); recordDroppedLocked(1); lock.unlock()
-            return
-        }
-        line += "\n"
-        lock.lock()
-        defer { lock.unlock() }
-        do {
-            try appendLineLocked(line)
-            rotateIfNeededLocked()
-        } catch {
-            recordDroppedLocked(1)
-        }
+    var dropped: Int {
+        lock.lock(); defer { lock.unlock() }
+        return droppedLocked()
     }
 
-    /// 追加并按指纹合并：同一条崩溃重复发生时只增加 count，不堆 200 条同样记录。
-    ///
-    /// 为什么必须换新的 `event_id`：服务端按 `event_id` 做重试去重。沿用旧 id 会把
-    /// 「已成功发送过」的合并记录判成 duplicate，新增的次数就丢了。
+    struct Batch {
+        let records: [[String: Any]]
+        fileprivate let lines: [String]
+        let encodedSizes: [Int]
+        let readable: Bool
+    }
+
+    /// 不按指纹合并：服务端负责聚合，客户端保留独立事件与发生日期。
+    /// 相同 event_id 的崩溃源重放是幂等的，不能再次增加 count。
     @discardableResult
-    public func appendMerged(_ record: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: record),
-              let line = String(data: data, encoding: .utf8) else {
-            lock.lock(); recordDroppedLocked(1); lock.unlock()
-            return false
-        }
-
-        lock.lock()
-        defer { lock.unlock() }
-
-        let fingerprint = Self.fingerprint(of: record)
-        var lines = readLinesLocked()
-        for index in lines.indices {
-            guard let existingData = lines[index].data(using: .utf8),
-                  var existing = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any] else {
-                continue
+    func appendMerged(_ record: [String: Any]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        do {
+            let current = try loadLocked()
+            if let id = record["event_id"] as? String,
+               current.contains(where: { $0.record["event_id"] as? String == id }) { return true }
+            guard JSONSerialization.isValidJSONObject(record) else { throw StoreError.encoding }
+            let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+            guard data.count <= 256 * 1024, data.count + 1 <= config.maxQueueBytes else {
+                recordDroppedLocked(1)
+                // 明确永久超限，恢复端可清源；无法写盘的失败仍返回 false。
+                return true
             }
-            guard Self.fingerprint(of: existing) == fingerprint else { continue }
-
-            let newCount = (record["count"] as? Int) ?? 1
-            let oldCount = (existing["count"] as? Int) ?? 1
-            existing["count"] = min(1000, oldCount + newCount)
-            existing["event_id"] = record["event_id"] ?? existing["event_id"]
-            existing["occurred_at"] = record["occurred_at"] ?? existing["occurred_at"]
-            existing["context"] = record["context"] ?? existing["context"]
-            existing["device"] = record["device"] ?? existing["device"]
-            if let breadcrumbs = record["breadcrumbs"] { existing["breadcrumbs"] = breadcrumbs }
-            if let payload = record["payload"] as? [String: Any] {
-                var merged = (existing["payload"] as? [String: Any]) ?? [:]
-                for (key, value) in payload { merged[key] = value }
-                existing["payload"] = merged
-            }
-            // 新记录带了更完整的异常上下文（例如 NSException 的栈）时不要被旧记录覆盖。
-            if let exception = record["exception"] as? [String: Any] {
-                var merged = (existing["exception"] as? [String: Any]) ?? [:]
-                for (key, value) in exception {
-                    if let text = value as? String, text.isEmpty { continue }
-                    merged[key] = value
+            let entry = Entry(line: String(decoding: data, as: UTF8.self), record: record)
+            if current.count + 1 > config.maxQueueRecords || bytes + data.count + 1 > config.maxQueueBytes {
+                let kept = bounded(current + [entry])
+                try replaceLocked(kept)
+                recordDroppedLocked(current.count + 1 - kept.count)
+            } else {
+                if !FileManager.default.fileExists(atPath: queueURL.path) {
+                    guard FileManager.default.createFile(atPath: queueURL.path, contents: nil) else { throw StoreError.write }
                 }
-                existing["exception"] = merged
+                let handle = try FileHandle(forWritingTo: queueURL)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data + Data([10]))
+                entries = current + [entry]
+                bytes += data.count + 1
             }
-            if let frames = record["frames"] as? [[String: Any]], !frames.isEmpty {
-                existing["frames"] = frames
-            }
-
-            guard let mergedData = try? JSONSerialization.data(withJSONObject: existing),
-                  let mergedLine = String(data: mergedData, encoding: .utf8) else {
-                recordDroppedLocked(1)
-                return false
-            }
-            lines[index] = mergedLine
-            guard writeLinesLocked(lines) else {
-                recordDroppedLocked(1)
-                return false
-            }
-            return true
-        }
-
-        do {
-            try appendLineLocked(line + "\n")
-            rotateIfNeededLocked()
             return true
         } catch {
+            entries = nil // 下次操作重新修复潜在半行；读失败绝不覆盖原文件。
             recordDroppedLocked(1)
             return false
         }
     }
 
-    public func pending(limit: Int) -> [[String: Any]] {
-        lock.lock()
-        defer { lock.unlock() }
+    func append(_ record: [String: Any]) { _ = appendMerged(record) }
 
-        var out: [[String: Any]] = []
-        for line in readLinesLocked() {
-            if out.count >= limit { break }
-            guard let data = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                recordDroppedLocked(1)
-                continue
-            }
-            out.append(obj)
+    func readBatch(limit: Int) -> Batch {
+        lock.lock(); defer { lock.unlock() }
+        guard let current = try? loadLocked() else {
+            return Batch(records: [], lines: [], encodedSizes: [], readable: false)
         }
-        return out
+        let batch = Array(current.prefix(max(0, limit)))
+        return Batch(records: batch.map(\.record), lines: batch.map(\.line), encodedSizes: batch.map { $0.line.utf8.count }, readable: true)
     }
 
-    public func dropFirst(_ count: Int) {
-        guard count > 0 else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        let rest = Array(readLinesLocked().dropFirst(count))
-        if rest.isEmpty {
-            try? FileManager.default.removeItem(at: queueURL)
-        } else {
-            writeLinesLocked(rest)
-        }
-    }
+    func pending(limit: Int) -> [[String: Any]] { readBatch(limit: limit).records }
 
-    /// 401/403 时按契约清空待发队列，避免拿着无效 token 一直重试。
-    public func clearQueue() {
-        lock.lock()
-        defer { lock.unlock() }
-        try? FileManager.default.removeItem(at: queueURL)
-    }
-
-    private func appendLineLocked(_ line: String) throws {
-        if !FileManager.default.fileExists(atPath: queueURL.path) {
-            FileManager.default.createFile(atPath: queueURL.path, contents: nil)
-        }
-        let handle = try FileHandle(forWritingTo: queueURL)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data(line.utf8))
-    }
-
-    @discardableResult
-    private func writeLinesLocked(_ lines: [String]) -> Bool {
-        let text = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    /// 冻结原始行作为收据。网络期间追加/轮转不能改变被确认的事件集合。
+    func acknowledge(_ batch: Batch, indexes: [Int]) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard indexes.allSatisfy({ batch.lines.indices.contains($0) }) else { return false }
         do {
-            try text.write(to: queueURL, atomically: true, encoding: .utf8)
+            var receipts = Dictionary(batch.lines.enumerated().filter { indexes.contains($0.offset) }
+                .map { ($0.element, 1) }, uniquingKeysWith: +)
+            let rest = try loadLocked().filter { entry in
+                let count = receipts[entry.line] ?? 0
+                if count > 0 { receipts[entry.line] = count - 1 }
+                return count == 0
+            }
+            try replaceLocked(rest)
             return true
-        } catch {
-            return false
+        } catch { return false }
+    }
+
+    private func loadLocked() throws -> [Entry] {
+        if let entries { return entries }
+        if !FileManager.default.fileExists(atPath: queueURL.path) { entries = []; bytes = 0; return [] }
+        let data = try Data(contentsOf: queueURL)
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        let valid = lines.compactMap { line -> Entry? in
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+            return Entry(line: line, record: obj)
         }
+        let kept = bounded(valid)
+        // 修复半行、损坏行及旧版本超限文件，避免坏行反复计丢弃或粘连新记录。
+        if kept.count != lines.count || data.last != 10 {
+            try replaceLocked(kept)
+            recordDroppedLocked(lines.count - kept.count)
+        } else {
+            entries = kept
+            bytes = kept.reduce(0) { $0 + $1.line.utf8.count + 1 }
+        }
+        return kept
     }
 
-    private func rotateIfNeededLocked() {
-        let lines = readLinesLocked()
-        let size = (try? FileManager.default.attributesOfItem(atPath: queueURL.path)[.size] as? NSNumber)?.intValue ?? 0
-        let overCount = lines.count > config.maxQueueRecords
-        let overBytes = size > config.maxQueueBytes
-        guard overCount || overBytes else { return }
-
-        let keep = max(config.maxQueueRecords * 3 / 4, 1)
-        let kept = Array(lines.suffix(keep))
-        recordDroppedLocked(lines.count - kept.count)
-        writeLinesLocked(kept)
+    private func bounded(_ items: [Entry]) -> [Entry] {
+        let total = items.reduce(0) { $0 + $1.line.utf8.count + 1 }
+        if items.count <= config.maxQueueRecords && total <= config.maxQueueBytes,
+           items.allSatisfy({ $0.line.utf8.count <= 256 * 1024 }) { return items }
+        var kept: [Entry] = []
+        var size = 0
+        for item in items.reversed() {
+            let n = item.line.utf8.count + 1
+            if n > config.maxQueueBytes || n > 256 * 1024 + 1 { continue }
+            if kept.count >= max(1, config.maxQueueRecords * 3 / 4) || size + n > config.maxQueueBytes { break }
+            kept.append(item); size += n
+        }
+        return kept.reversed()
     }
 
-    private func readLinesLocked() -> [String] {
-        guard let text = try? String(contentsOf: queueURL, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+    private func replaceLocked(_ items: [Entry]) throws {
+        let text = items.isEmpty ? "" : items.map(\.line).joined(separator: "\n") + "\n"
+        try Data(text.utf8).write(to: queueURL, options: .atomic)
+        entries = items
+        bytes = text.utf8.count
     }
 
     private func droppedLocked() -> Int {
-        if let value = Int((try? String(contentsOf: droppedURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") {
-            return value
-        }
-        return 0
+        if let droppedValue { return droppedValue }
+        let value = Int((try? String(contentsOf: droppedURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        droppedValue = max(0, value)
+        return droppedValue!
     }
 
     private func recordDroppedLocked(_ count: Int) {
         guard count > 0 else { return }
-        let value = droppedLocked() + count
-        try? String(value).write(to: droppedURL, atomically: true, encoding: .utf8)
+        let value = droppedLocked().addingReportingOverflow(count)
+        droppedValue = value.overflow ? Int.max : value.partialValue
+        try? String(droppedValue!).write(to: droppedURL, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - 崩溃帧
-
-    /// 读回崩溃帧，只取最近 `maxCrashRecords` 条。`crash.bin` 本身可能被坏版本写得很长，
-    /// 读取端限制数量，避免一次启动解析上千帧。
-    public func crashFrames() -> [moo_crash_frame] {
+    func crashFrames() -> [moo_crash_frame] {
         var buffer = [moo_crash_frame](repeating: moo_crash_frame(), count: config.maxCrashRecords)
         let count = buffer.withUnsafeMutableBufferPointer { ptr -> Int in
             guard let base = ptr.baseAddress else { return 0 }
-            return moo_crash_read_last(crashURL.path, base, ptr.count)
+            return moo_crash_read_last(crashPath, base, ptr.count)
         }
         return Array(buffer.prefix(count))
     }
 
-    public var hasCrashFrames: Bool {
-        var frame = moo_crash_frame()
-        return moo_crash_read_last(crashURL.path, &frame, 1) > 0
+    /// 安装信号处理前，在普通上下文原子收缩遗留原始帧；处理器打开的inode此后不变。
+    func prepareCrashFile() -> Bool {
+        let url = URL(fileURLWithPath: crashPath)
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: crashPath),
+              let size = attributes[.size] as? NSNumber else { return true }
+        let stride = MemoryLayout<moo_crash_frame>.stride
+        guard size.int64Value > Int64(config.maxCrashRecords * stride) else { return true }
+        let frames = crashFrames()
+        // 无法确认读取成功时不能为了容量覆盖未知源；后续仍只作有界读取。
+        guard !frames.isEmpty else { return false }
+        let data = frames.withUnsafeBufferPointer { Data(bytes: $0.baseAddress!, count: $0.count * stride) }
+        do {
+            try data.write(to: url, options: .atomic)
+            noteDropped(max(0, Int(size.int64Value / Int64(stride)) - frames.count))
+            return true
+        } catch { return false }
     }
 
-    public func resetCrashFile() {
-        moo_crash_reset(crashURL.path)
+    func noteDropped(_ count: Int) {
+        lock.lock(); defer { lock.unlock() }
+        recordDroppedLocked(count)
     }
 
-    public var crashPath: String { crashURL.path }
+    var hasCrashFrames: Bool { !crashFrames().isEmpty }
+    func synchronizeQueue() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        do {
+            let handle = try FileHandle(forWritingTo: queueURL)
+            defer { try? handle.close() }
+            try handle.synchronize()
+            return true
+        } catch { return false }
+    }
+    func resetCrashFile() -> Bool { moo_crash_reset(crashPath) == 0 }
 
-    // MARK: - 运行状态（跨启动）
-
-    public struct DisabledStamp: Codable, Equatable {
-        public var at: Double
-        public var release: String
-        public var build: String
+    struct DisabledStamp: Codable, Equatable {
+        var at: Double
+        var release: String? // 兼容旧文件；旧构建范围的禁用不再阻止新发送身份。
+        var build: String?
+        var identity: String?
+    }
+    struct RetryState: Codable, Equatable {
+        var attempts: Int
+        var nextAt: Double
+        var reason: String?
+        var identity: String? = nil
     }
 
-    public struct RetryState: Codable, Equatable {
-        public var attempts: Int
-        public var nextAt: Double
-        public var reason: String?
+    static func identity(_ config: MonitorConfig) -> String {
+        let parts = [config.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/")), config.app, config.token]
+        let data = (try? JSONSerialization.data(withJSONObject: parts)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
-
-    public func disabledStamp() -> DisabledStamp? {
-        guard let data = try? Data(contentsOf: disabledURL) else { return nil }
-        return try? JSONDecoder().decode(DisabledStamp.self, from: data)
+    func disabledStamp() -> DisabledStamp? { readState(DisabledStamp.self, from: disabledURL) }
+    func isDisabled(for config: MonitorConfig) -> Bool { disabledStamp()?.identity == Self.identity(config) }
+    func setDisabledStamp(config: MonitorConfig, now: Date = Date()) {
+        writeState(DisabledStamp(at: now.timeIntervalSince1970, identity: Self.identity(config)), to: disabledURL)
     }
-
-    public func setDisabledStamp(release: String, build: String, now: Date = Date()) {
-        let stamp = DisabledStamp(at: now.timeIntervalSince1970, release: release, build: build)
-        if let data = try? JSONEncoder().encode(stamp) {
-            try? data.write(to: disabledURL, options: .atomic)
-        }
+    func clearDisabledStamp() { try? FileManager.default.removeItem(at: disabledURL) }
+    func retryState() -> RetryState? { readState(RetryState.self, from: retryURL) }
+    func setRetryState(_ state: RetryState) { writeState(state, to: retryURL) }
+    func clearRetryState() { try? FileManager.default.removeItem(at: retryURL) }
+    private func readState<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
     }
-
-    public func clearDisabledStamp() {
-        try? FileManager.default.removeItem(at: disabledURL)
+    private func writeState<T: Encodable>(_ value: T, to url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        if let data = try? JSONEncoder().encode(value) { try? data.write(to: url, options: .atomic) }
     }
-
-    public func retryState() -> RetryState? {
-        guard let data = try? Data(contentsOf: retryURL) else { return nil }
-        return try? JSONDecoder().decode(RetryState.self, from: data)
-    }
-
-    public func setRetryState(_ state: RetryState) {
-        if let data = try? JSONEncoder().encode(state) {
-            try? data.write(to: retryURL, options: .atomic)
-        }
-    }
-
-    public func clearRetryState() {
-        try? FileManager.default.removeItem(at: retryURL)
-    }
-
-    // MARK: - 指纹
-
-    /// 队列内合并用的本地指纹。服务端不信任客户端 hash，会自己重算；
-    /// 这里只用于「同一进程内同一条崩溃别堆 200 行」，不参与上报。
-    static func fingerprint(of record: [String: Any]) -> String {
-        let platform = record["platform"] as? String ?? ""
-        let kind = record["kind"] as? String ?? ""
-        let exception = record["exception"] as? [String: Any] ?? [:]
-        let name = exception["name"] as? String ?? ""
-        let message = normalize(exception["message"] as? String ?? "")
-        let frames = (record["frames"] as? [[String: Any]] ?? []).prefix(3).map {
-            ($0["function"] as? String) ?? ($0["file"] as? String) ?? ""
-        }
-        return [platform, kind, name, message, frames.joined(separator: "|")].joined(separator: "\u{1F}")
-    }
-
-    private static func normalize(_ message: String) -> String {
-        var value = message
-        value = value.replacingOccurrences(of: #"0x[0-9a-fA-F]+"#, with: "0xN", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"\b[0-9a-fA-F]{8,}\b"#, with: "HEX", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"\d+"#, with: "N", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-        return String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
-    }
+    private enum StoreError: Error { case encoding, write }
 }

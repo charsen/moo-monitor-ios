@@ -3,6 +3,21 @@ import XCTest
 
 final class EventStoreTests: XCTestCase {
 
+    func testByteLimitAppliesEvenBelowRecordLimit() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = EventStore(directory: dir, config: MonitorConfig(token: "t", maxQueueRecords: 200, maxQueueBytes: 300))
+        for i in 0..<4 { store.append(["event_id": "e\(i)", "message": String(repeating: "x", count: 150)]) }
+        let size = try Data(contentsOf: dir.appendingPathComponent("queue.jsonl")).count
+        XCTAssertLessThanOrEqual(size, 300)
+    }
+
+    func testReplayingSameRecoveredEventDoesNotIncreaseCount() {
+        let store = makeStore()
+        XCTAssertTrue(store.appendMerged(record(id: "stable")))
+        XCTAssertTrue(store.appendMerged(record(id: "stable")))
+        XCTAssertEqual(store.pending(limit: 10).first?["count"] as? Int, 1)
+    }
+
     private func makeStore(maxRecords: Int = 5) -> EventStore {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("moo-monitor-test-\(UUID().uuidString)", isDirectory: true)
@@ -26,20 +41,22 @@ final class EventStoreTests: XCTestCase {
         XCTAssertGreaterThan(store.dropped, 0)
     }
 
-    func testDropFirstKeepsRest() {
-        let store = makeStore(maxRecords: 10)
-        for i in 0..<4 { store.append(["event_id": "e\(i)"]) }
-
-        store.dropFirst(2)
-
-        XCTAssertEqual(store.pending(limit: 10).compactMap { $0["event_id"] as? String }, ["e2", "e3"])
+    func testAcknowledgesOnlyFrozenRecordsAfterRotation() {
+        let store = makeStore(maxRecords: 3)
+        store.append(["event_id": "a"])
+        store.append(["event_id": "b"])
+        let batch = store.readBatch(limit: 2)
+        store.append(["event_id": "c"])
+        store.append(["event_id": "d"])
+        XCTAssertTrue(store.acknowledge(batch, indexes: [0, 1]))
+        XCTAssertEqual(store.pending(limit: 10).compactMap { $0["event_id"] as? String }, ["c", "d"])
     }
 
     func testCrashFramesEmptyWhenNoFile() {
         XCTAssertTrue(makeStore().crashFrames().isEmpty)
     }
 
-    func testMergesSameFingerprintAndKeepsNewEventId() {
+    func testDistinctOccurrencesRemainIndependentUntilCloudAggregation() {
         let store = makeStore(maxRecords: 10)
         let first = record(id: "first", count: 1)
         let second = record(id: "second", count: 2)
@@ -48,9 +65,9 @@ final class EventStoreTests: XCTestCase {
         XCTAssertTrue(store.appendMerged(second))
 
         let pending = store.pending(limit: 10)
-        XCTAssertEqual(pending.count, 1)
-        XCTAssertEqual(pending.first?["event_id"] as? String, "second")
-        XCTAssertEqual(pending.first?["count"] as? Int, 3)
+        XCTAssertEqual(pending.count, 2)
+        XCTAssertEqual(pending.last?["event_id"] as? String, "second")
+        XCTAssertEqual(pending.last?["count"] as? Int, 2)
     }
 
     func testDoesNotMergeDifferentFingerprint() {
@@ -59,12 +76,6 @@ final class EventStoreTests: XCTestCase {
         store.appendMerged(record(id: "b", name: "NSInvalidArgumentException"))
 
         XCTAssertEqual(store.pending(limit: 10).count, 2)
-    }
-
-    func testFingerprintNormalizesAddressesAndNumbers() {
-        let one = record(id: "a", message: "bad at 0x1234abcd and 42")
-        let two = record(id: "b", message: "bad at 0xdeadbeef and 7")
-        XCTAssertEqual(EventStore.fingerprint(of: one), EventStore.fingerprint(of: two))
     }
 
     private func record(

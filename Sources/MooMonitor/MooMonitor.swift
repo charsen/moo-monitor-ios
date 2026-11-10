@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MooMonitorCrash
 
 #if canImport(UIKit)
@@ -12,6 +13,8 @@ public final class MooMonitor {
     public static let shared = MooMonitor()
 
     private let stateLock = NSLock()
+    private let breadcrumbLock = NSLock()
+    private var lastLifecycle: Bool?
     private var isInstalled = false
     private var config: MonitorConfig?
     private var store: EventStore?
@@ -24,12 +27,21 @@ public final class MooMonitor {
     private var screenValue: String?
     private var breadcrumbs: [(at: Date, type: String, name: String)] = []
     private var cachedForeground = true
-    private var lastMemoryWarning: Date?
+    private var lastMemoryWarning: TimeInterval?
     private var startupTask: Task<Void, Never>?
     private var memoryObserver: NSObjectProtocol?
+    private var flushTask: Task<Void, Never>?
+    private var installedFlag = false
 
-    public private(set) var disabled = false
-    public var installed: Bool { isInstalled && config?.enabled == true && !disabled }
+    private var disabledValue = false
+    public var disabled: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return disabledValue
+    }
+    public var installed: Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return installedFlag && !disabledValue
+    }
 
     /// 当前界面名。只用于上报，不参与业务逻辑。
     public var screen: String? {
@@ -38,7 +50,8 @@ public final class MooMonitor {
         return screenValue
     }
 
-    private init() {}
+    private let runtimeHooks: Bool
+    init(runtimeHooks: Bool = true) { self.runtimeHooks = runtimeHooks }
 
     // MARK: - 安装
 
@@ -47,29 +60,35 @@ public final class MooMonitor {
     }
 
     public func install(_ config: MonitorConfig, directory: URL? = nil) {
-        guard config.enabled, !isInstalled else { return }
+        guard config.enabled else { return }
+        stateLock.lock()
+        guard !isInstalled else { stateLock.unlock(); return }
+        isInstalled = true
+        stateLock.unlock()
 
         let store = directory.map { EventStore(directory: $0, config: config) } ?? EventStore.forApp(config: config)
         self.config = config
         self.store = store
         self.uploader = Uploader(config: config, store: store)
-        self.session = SessionMarker(directory: store.dir, config: config)
         self.deviceSnapshot = DeviceInfo.device()
+        self.session = SessionMarker(directory: store.dir, config: config, device: deviceSnapshot.compactMapValues { $0 as? String })
         self.installId = DeviceInfo.installId(fallbackDirectory: store.dir)
-        isInstalled = true
+        deviceSnapshot["storage_free"] = DeviceInfo.context(installId: installId, sessionId: sessionId, screen: nil)["storage_free"]
 
-        // token 撤销后服务端会 401/403；同一构建不再打服务器。换构建自动解除，
-        // 避免一次临时故障把后续版本永久禁用。
-        if let stamp = store.disabledStamp(), stamp.release == config.release, stamp.build == config.build {
-            disabled = true
+        if store.isDisabled(for: config) {
+            stateLock.lock(); disabledValue = true; stateLock.unlock()
             return
         }
-        if store.disabledStamp() != nil { store.clearDisabledStamp() }
+        store.clearDisabledStamp()
+        stateLock.lock(); installedFlag = true; stateLock.unlock()
 
-        // 先装 C 侧信号处理（打开 fd、缓存 image 表），再处理上次遗留的帧。
-        _ = store.crashPath.withCString { moo_crash_install($0) }
-        CrashReporter.install { [weak self] name, reason, stack in
-            self?.recordException(name: name, reason: reason, stack: stack)
+        // 先在普通上下文裁剪旧文件，再打开常驻fd；不能在handler里轮转。
+        _ = store.prepareCrashFile()
+        if runtimeHooks {
+            _ = store.crashPath.withCString { moo_crash_install($0) }
+            CrashReporter.install { [weak self] name, reason, stack in
+                self?.recordException(name: name, reason: reason, stack: stack)
+            }
         }
 
         #if canImport(UIKit)
@@ -78,17 +97,17 @@ public final class MooMonitor {
 
         let previousBreadcrumbs = loadPersistedBreadcrumbs()
         clearPersistedBreadcrumbs()
-        let previous = session?.begin(sessionId: sessionId)
+        let previous = session?.current()
         let frames = store.crashFrames()
         let hasException = FileManager.default.fileExists(atPath: exceptionURL.path)
-        let hadCrash = !frames.isEmpty || hasException
+        let hadCrash = !frames.isEmpty || hasException || FileManager.default.fileExists(atPath: store.dir.appendingPathComponent("crash-recovery.json").path)
 
         // 上次停在 foreground、这次没有崩溃帧 → 可能是 watchdog / OOM / 上滑强杀。
         // 换了构建不推断：覆盖安装会把旧进程的「前台」状态带过来。
         if let previous, Self.shouldInferTermination(previous: previous, hadCrash: hadCrash, config: config) {
             let occurred = Date(timeIntervalSince1970: Double(previous.updated_at) / 1000)
-            let duration = max(0, Date().timeIntervalSince(occurred) * 1000)
-            let record = buildRecord(
+            let duration = max(0, Double(previous.updated_at) - Double(previous.started_at))
+            var record = buildRecord(
                 kind: "termination",
                 name: "unknown",
                 message: "进程在前台消失，没有捕获到崩溃帧",
@@ -105,20 +124,27 @@ public final class MooMonitor {
                     "duration_ms": Int(duration),
                 ]
             )
+            record["event_id"] = "termination-" + previous.session_id
+            var context = record["context"] as? [String: Any] ?? [:]
+            context["session_id"] = previous.session_id
+            record["context"] = context
             enqueue(record)
         }
 
         drainExceptionFile()
-        drainCrashFrames(frames, screen: previous?.screen, breadcrumbs: previousBreadcrumbs)
-        installMemoryObserver()
+        drainCrashFrames(frames, previous: previous, breadcrumbs: previousBreadcrumbs)
+        _ = session?.begin(sessionId: sessionId)
+        if runtimeHooks { installMemoryObserver() }
         addBreadcrumb("lifecycle", "launch")
-        scheduleStartupFlush()
+        if runtimeHooks { scheduleStartupFlush() }
     }
 
     /// 脏退出推断的纯规则：上次停在 foreground、同一构建、且这次没有读到任何崩溃证据。
     /// 换构建不推断：覆盖安装会把旧进程的「前台」状态带过来。
     static func shouldInferTermination(previous: SessionState?, hadCrash: Bool, config: MonitorConfig) -> Bool {
-        guard let previous, !hadCrash else { return false }
+        guard let previous, !hadCrash,
+              previous.started_at >= 0, previous.updated_at >= previous.started_at,
+              Double(previous.updated_at) / 1000 <= Date().timeIntervalSince1970 else { return false }
         return previous.state == SessionMarker.State.foreground.rawValue
             && previous.release == config.release
             && previous.build == config.build
@@ -130,17 +156,20 @@ public final class MooMonitor {
               let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return
         }
-        if store.appendMerged(record) {
+        if store.appendMerged(record), store.synchronizeQueue() {
             try? FileManager.default.removeItem(at: exceptionURL)
         }
     }
 
     /// 把 `crash.bin` 里的帧还原成可读记录并入队列。
     /// 必须在 install 里做：符号化依赖当前进程的 image 表，越早越接近崩溃时的构建。
-    private func drainCrashFrames(_ frames: [moo_crash_frame], screen: String?, breadcrumbs: [[String: Any]]) {
-        guard let store, !frames.isEmpty else { return }
-
-        var allAppended = true
+    private func drainCrashFrames(_ frames: [moo_crash_frame], previous: SessionState?, breadcrumbs: [[String: Any]]) {
+        guard let store else { return }
+        let recoveryURL = store.dir.appendingPathComponent("crash-recovery.json")
+        var recovered = ((try? Data(contentsOf: recoveryURL)).flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]]
+        }) ?? []
+        var seen = Set(recovered.compactMap { $0["event_id"] as? String })
         for frame in frames {
             var resolved = FrameResolver.resolve(frame)
             // 信号处理器自己的帧不是崩溃现场；_sigtramp 是内核到 handler 的桥，也一并去掉。
@@ -149,28 +178,52 @@ public final class MooMonitor {
                 resolved.removeFirst()
             }
             let symbols = resolved.compactMap { $0["function"] as? String }
-            let record = buildRecord(
+            var record = buildRecord(
                 kind: "crash",
                 name: signalName(frame.sig),
                 message: "signal \(frame.sig)",
                 stack: symbols.joined(separator: "\n"),
                 frames: resolved,
-                occurredAt: Date(timeIntervalSince1970: Double(frame.timestamp_ms) / 1000),
-                screen: screen,
+                occurredAt: Date(timeIntervalSince1970: min(Double(frame.timestamp_ms) / 1000, Date().timeIntervalSince1970)),
+                screen: previous?.screen,
                 fallbackToCurrentScreen: false,
                 breadcrumbOverride: breadcrumbs,
                 extras: [
                     "signal": Int(frame.sig),
-                    "thread_id": String(frame.thread_id),
                     "depth": Int(frame.depth),
                     "image_count": Int(frame.image_count),
                 ]
             )
-            allAppended = store.appendMerged(record) && allAppended
+            let digest = withUnsafeBytes(of: frame) { SHA256.hash(data: Data($0)).map { String(format: "%02x", $0) }.joined() }
+            let id = "signal-" + digest
+            record["event_id"] = id
+            record["release"] = previous?.release ?? ""
+            record["build"] = previous?.build ?? ""
+            record["env"] = previous?.env ?? "unknown"
+            record["device"] = previous?.device ?? [:]
+            var context = record["context"] as? [String: Any] ?? [:]
+            context.removeValue(forKey: "storage_free")
+            context["session_id"] = previous?.session_id
+            context["foreground"] = previous.map { $0.state == "foreground" }
+            record["context"] = context
+            if seen.insert(id).inserted { recovered.append(record) }
         }
 
-        // 只有全部并入成功才清文件；失败留到下次启动重试，宁可重复也不丢。
-        if allAppended { store.resetCrashFile() }
+        let cap = min(20, max(1, config?.maxCrashRecords ?? 20))
+        if recovered.count > cap {
+            let excess = recovered.count - cap
+            recovered = Array(recovered.suffix(cap))
+            store.noteDropped(excess)
+        }
+        guard !recovered.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: recovered),
+              (try? data.write(to: recoveryURL, options: .atomic)) != nil else { return }
+        // 先冻结原构建/会话与稳定 ID，再入队、同步、清源；失败后跨启动仍用同一份记录。
+        var allAppended = true
+        for record in recovered { allAppended = store.appendMerged(record) && allAppended }
+        if allAppended, store.synchronizeQueue(), store.resetCrashFile() {
+            try? FileManager.default.removeItem(at: recoveryURL)
+        }
     }
 
     private func scheduleStartupFlush() {
@@ -200,44 +253,54 @@ public final class MooMonitor {
 
     public func enterForeground() {
         guard installed else { return }
-        stateLock.lock(); cachedForeground = true; stateLock.unlock()
+        stateLock.lock()
+        guard lastLifecycle != true else { stateLock.unlock(); return }
+        lastLifecycle = true; cachedForeground = true
         session?.mark(.foreground)
+        stateLock.unlock()
         addBreadcrumb("lifecycle", "foreground")
     }
 
     public func enterBackground() {
         guard installed else { return }
-        stateLock.lock(); cachedForeground = false; stateLock.unlock()
+        stateLock.lock()
+        guard lastLifecycle != false else { stateLock.unlock(); return }
+        lastLifecycle = false; cachedForeground = false
         session?.mark(.background)
+        stateLock.unlock()
         addBreadcrumb("lifecycle", "background")
         #if canImport(UIKit)
-        if Thread.isMainThread {
-            flushInBackground()
-        } else {
-            DispatchQueue.main.async { [weak self] in self?.flushInBackground() }
-        }
+        DispatchQueue.main.async { [weak self] in self?.flushInBackground() }
         #else
         Task { [weak self] in await self?.flush() }
         #endif
     }
 
     #if canImport(UIKit)
-    private func flushInBackground() {
-        let task = UIApplication.shared.beginBackgroundTask(withName: "MooMonitor.flush")
+    @MainActor private func flushInBackground() {
+        let lease = BackgroundLease()
+        lease.identifier = UIApplication.shared.beginBackgroundTask(withName: "MooMonitor.flush") { [weak self, weak lease] in
+            self?.cancelFlush()
+            lease?.end()
+        }
         Task { [weak self] in
             await self?.flush()
-            if task != .invalid {
-                await MainActor.run { UIApplication.shared.endBackgroundTask(task) }
-            }
+            await MainActor.run { lease.end() }
         }
+    }
+
+    private func cancelFlush() {
+        stateLock.lock(); let task = flushTask; stateLock.unlock()
+        task?.cancel()
     }
     #endif
 
-    private func recordLowMemory() {
+    func recordLowMemory(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard installed else { return }
-        let now = Date()
-        if let last = lastMemoryWarning, now.timeIntervalSince(last) < 3600 { return }
+        stateLock.lock()
+        if let last = lastMemoryWarning, now - last < 3600 { stateLock.unlock(); return }
         lastMemoryWarning = now
+        stateLock.unlock()
         addBreadcrumb("lifecycle", "memory_warning")
         enqueue(buildRecord(
             kind: "low_memory",
@@ -254,28 +317,29 @@ public final class MooMonitor {
     public static func screen(_ name: String) { shared.setScreen(name) }
 
     public func setScreen(_ name: String) {
-        let clean = String((Redactor.scrub(name) ?? name).prefix(64))
+        guard installed, let clean = Redactor.screen(name) else { return }
         stateLock.lock()
+        guard screenValue != clean else { stateLock.unlock(); return }
         screenValue = clean
         stateLock.unlock()
         session?.markScreen(clean)
         addBreadcrumb("screen", clean)
     }
 
-    public static func capture(_ error: Error, extras: [String: Any] = [:]) {
-        shared.capture(error, extras: extras)
+    public static func capture(_ error: Error, kind: String = "handled", extras: [String: Any] = [:]) {
+        shared.capture(error, kind: kind, extras: extras)
     }
 
     /// 业务主动上报（导入失败、同步失败、SQLite 错误等）。默认不采样，由调用点决定。
-    public func capture(_ error: Error, extras: [String: Any] = [:]) {
-        guard installed, let store else { return }
+    public func capture(_ error: Error, kind: String = "handled", extras: [String: Any] = [:]) {
+        guard ["handled", "webview_gone"].contains(kind), installed, let store else { return }
         var payload = extras
         let ns = error as NSError
         payload["domain"] = ns.domain
         payload["code"] = ns.code
         let record = buildRecord(
-            kind: "handled",
-            name: String(describing: type(of: error)),
+            kind: kind,
+            name: Redactor.truncate(Redactor.scrub(ns.domain) ?? "Error", bytes: 192) + "#" + String(ns.code),
             message: error.localizedDescription,
             stack: Thread.callStackSymbols.joined(separator: "\n"),
             frames: [],
@@ -285,7 +349,9 @@ public final class MooMonitor {
     }
 
     public func addBreadcrumb(_ type: String, _ name: String) {
-        let entry = (at: Date(), type: String(type.prefix(16)), name: String(name.prefix(64)))
+        guard installed else { return }
+        breadcrumbLock.lock(); defer { breadcrumbLock.unlock() }
+        let entry = (at: Date(), type: String((Redactor.scrub(type) ?? "").prefix(16)), name: String((Redactor.scrub(name) ?? "").prefix(64)))
         stateLock.lock()
         breadcrumbs.append(entry)
         if breadcrumbs.count > 30 {
@@ -324,7 +390,12 @@ public final class MooMonitor {
 
     /// NSException 路径：写到独立文件，不碰队列锁。下次启动再并入队列。
     private func recordException(name: String, reason: String?, stack: [String]) {
-        guard installed, let config else { return }
+        // 异常可能发生在持有 stateLock 的线程；不能经 installed 的阻塞 getter。
+        guard stateLock.try() else { return }
+        let active = installedFlag && !disabledValue
+        let config = self.config
+        stateLock.unlock()
+        guard active, let config else { return }
         let record = buildRecord(
             kind: "crash",
             name: name,
@@ -352,11 +423,41 @@ public final class MooMonitor {
     }
 
     public func flush() async {
-        guard let uploader else { return }
-        let outcome = await uploader.flush()
-        if outcome == .disabled {
-            disabled = true
+        await currentFlushTask()?.value
+    }
+
+    private func currentFlushTask() -> Task<Void, Never>? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        guard installedFlag, !disabledValue, let uploader else { return nil }
+        if let flushTask { return flushTask }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { self.finishedFlush() }
+            while !Task.isCancelled {
+                let outcome = await uploader.flush()
+                if outcome == .disabled {
+                    self.markDisabled()
+                    return
+                }
+                if outcome == .more { continue }
+                guard case .retry(let reason) = outcome,
+                      reason != "exhausted", reason != "cancelled", reason != "busy",
+                      let state = self.store?.retryState(), state.attempts < 6 else { return }
+                let delay = max(1, state.nextAt - Date().timeIntervalSince1970)
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            }
         }
+        flushTask = task
+        return task
+    }
+
+    private func finishedFlush() {
+        stateLock.lock(); flushTask = nil; stateLock.unlock()
+    }
+
+    private func markDisabled() {
+        stateLock.lock(); disabledValue = true; stateLock.unlock()
+        moo_crash_set_enabled(0)
     }
 
     // MARK: - 记录
@@ -384,11 +485,15 @@ public final class MooMonitor {
             // 异常处理器里不碰 UIApplication / 文件系统：只用安装时缓存和当前内存状态。
             context = ["install_id": installId, "session_id": sessionId]
             if let resolvedScreen { context["screen"] = resolvedScreen }
-            stateLock.lock()
-            context["foreground"] = cachedForeground
-            stateLock.unlock()
+            if stateLock.try() {
+                context["foreground"] = cachedForeground
+                stateLock.unlock()
+            }
         } else {
-            context = DeviceInfo.context(installId: installId, sessionId: sessionId, screen: resolvedScreen)
+            context = ["install_id": installId, "session_id": sessionId]
+            if let resolvedScreen { context["screen"] = resolvedScreen }
+            stateLock.lock(); context["foreground"] = cachedForeground; stateLock.unlock()
+            context["storage_free"] = deviceSnapshot["storage_free"]
         }
 
         var record: [String: Any] = [
@@ -403,7 +508,7 @@ public final class MooMonitor {
             "env": config?.env ?? "release",
             "exception": [
                 "name": Redactor.scrub(name) ?? "Error",
-                "message": Redactor.scrub(message ?? "") ?? "",
+                "message": Redactor.truncate(Redactor.scrub(message ?? "") ?? "", bytes: 8 * 1024),
                 "stack": Redactor.scrub(stack ?? "") ?? "",
             ],
             "frames": frames,
@@ -414,8 +519,8 @@ public final class MooMonitor {
         let crumbs = breadcrumbOverride ?? breadcrumbPayload(avoidBlocking: safe)
         if !crumbs.isEmpty { record["breadcrumbs"] = crumbs }
 
-        var payload = extras
-        if !safe, let store, store.dropped > 0 { payload["dropped"] = store.dropped }
+        let dropped = safe ? 0 : (store?.dropped ?? 0)
+        let payload = Redactor.payload(extras, dropped: dropped)
         if !payload.isEmpty { record["payload"] = payload }
         return record
     }
@@ -450,7 +555,7 @@ public final class MooMonitor {
     private func severity(for kind: String) -> String {
         switch kind {
         case "crash": return "fatal"
-        case "low_memory": return "warning"
+        case "low_memory", "termination": return "warning"
         default: return "error"
         }
     }
@@ -479,3 +584,14 @@ extension ISO8601DateFormatter {
         return f
     }()
 }
+
+#if canImport(UIKit)
+@MainActor private final class BackgroundLease {
+    var identifier = UIBackgroundTaskIdentifier.invalid
+    func end() {
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+        identifier = .invalid
+    }
+}
+#endif

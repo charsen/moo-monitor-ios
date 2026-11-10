@@ -6,9 +6,9 @@ import UIKit
 #endif
 
 /// 设备与环境快照。取不到的项就是缺字段，绝不让采集本身抛错。
-public enum DeviceInfo {
+enum DeviceInfo {
 
-    public static func device() -> [String: Any] {
+    static func device() -> [String: Any] {
         var out: [String: Any] = [
             "os": "iOS",
             "os_version": ProcessInfo.processInfo.operatingSystemVersionString
@@ -48,7 +48,7 @@ public enum DeviceInfo {
         }
     }
 
-    public static func context(installId: String, sessionId: String, screen: String?) -> [String: Any] {
+    static func context(installId: String, sessionId: String, screen: String?) -> [String: Any] {
         var out: [String: Any] = [
             "install_id": installId,
             "session_id": sessionId,
@@ -63,16 +63,17 @@ public enum DeviceInfo {
         return out
     }
 
-    /// 随机 UUID 的 SHA-256，存 Keychain；卸载重装会换。不复用同步凭据的 key。
+    /// 随机 UUID 的 SHA-256，存 Keychain；Keychain 可能跨卸载保留；不承诺重装后换标识。不复用同步凭据的 key。
     ///
     /// Keychain 在首次解锁前/无签名模拟器上可能不可用，这时退回沙盒文件，
     /// 避免每次启动都换一个 install_id，把唯一安装数算虚。
-    public static func installId(fallbackDirectory: URL? = nil) -> String {
+    static func installId(fallbackDirectory: URL? = nil) -> String {
         let account = "moo-monitor-install"
         let service = "com.mooeen.monitor"
         let fallbackURL = fallbackDirectory?.appendingPathComponent("install-id")
 
         if let existing = Keychain.read(service: service, account: account) {
+            if let fallbackURL { try? Data(existing.utf8).write(to: fallbackURL, options: .atomic) }
             return hash(existing)
         }
         if let fallbackURL, let data = try? Data(contentsOf: fallbackURL),

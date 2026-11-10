@@ -29,10 +29,15 @@ public struct MonitorConfig {
         self.release = release
         self.build = build
         self.env = env
-        self.maxQueueRecords = maxQueueRecords
-        self.maxQueueBytes = maxQueueBytes
-        self.maxCrashRecords = maxCrashRecords
+        self.maxQueueRecords = min(200, max(1, maxQueueRecords))
+        self.maxQueueBytes = min(2 * 1024 * 1024, max(1, maxQueueBytes))
+        self.maxCrashRecords = min(20, max(1, maxCrashRecords))
     }
 
-    public var enabled: Bool { !token.isEmpty && !endpoint.isEmpty }
+    public var enabled: Bool {
+        guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let url = URL(string: endpoint), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return false }
+        return true
+    }
 }

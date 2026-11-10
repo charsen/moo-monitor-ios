@@ -10,6 +10,7 @@ let package = Package(
     targets: [
         .target(name: "MooMonitorCrash"),
         .target(name: "MooMonitor", dependencies: ["MooMonitorCrash"]),
-        .testTarget(name: "MooMonitorTests", dependencies: ["MooMonitor"]),
+        .executableTarget(name: "MonitorCrashProbe", dependencies: ["MooMonitorCrash"], path: "Tests/CrashProbe"),
+        .testTarget(name: "MooMonitorTests", dependencies: ["MooMonitor"], resources: [.copy("Fixtures")]),
     ]
 )

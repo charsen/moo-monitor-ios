@@ -6,7 +6,7 @@ iOS / iPadOS 端异常采集 SDK：ObjC 异常、致命信号、内存警告、�
 
 ## 状态
 
-**M1 已接入书禾 Apple，`swift test` 23 条通过；模拟器闭环已验证，真机「系统崩溃报告仍生成」红线待验。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
+**M1 已接入书禾 Apple，本轮完成队列/回执/隐私/信号路径深化；测试证据与真机边界见 HANDOFF。** 设计与边界见 [`docs/design.md`](docs/design.md)，实施顺序见 [`TODOS.md`](TODOS.md)。
 
 ## 定位
 
@@ -32,7 +32,7 @@ struct App: App {
 }
 ```
 
-宿主还需在 `scenePhase` 变化时调 `MooMonitor.enterForeground()` / `MooMonitor.enterBackground()`，在关键视图 `onAppear` 调 `MooMonitor.screen("ReaderView")`。token 为空时 SDK 整体禁用，不发任何请求。
+宿主还需在 `scenePhase` 变化时调 `MooMonitor.enterForeground()` / `MooMonitor.enterBackground()`，仅在真正 `.background` 时转发后台，`.inactive` 不等同于退后台；在关键视图 `onAppear` 调 `MooMonitor.screen("ReaderView")`。token 为空时 SDK 整体禁用，不发任何请求。
 
 ## 文档
 
@@ -41,7 +41,8 @@ struct App: App {
 | [`docs/design.md`](docs/design.md) | 采集点、信号处理、符号化、落盘、上报、脱敏、测试、边界 |
 | [`AGENTS.md`](AGENTS.md) | 本仓协作与编码约束 |
 | [`NOTES.md`](NOTES.md) | 环境、验证边界、已知坑 |
-| [`TODOS.md`](TODOS.md) | 分阶段实施清单 |
+| [`TODOS.md`](TODOS.md) | 当前未完成事项 |
+| [`HANDOFF.md`](HANDOFF.md) | 本轮修复、测试与产物证据 |
 
 云端契约（数据表、指纹规则、count 语义、端点与能力）以 `moo-scaffold-cloud/docs/app-monitor.md` 为唯一来源，本仓不复制。
 
@@ -54,3 +55,5 @@ struct App: App {
 双远端：gitee `charsen/moo-monitor-ios`（主）、GitHub `charsen/moo-monitor-ios`（镜像）。
 
 MIT，见 [`LICENSE`](LICENSE)。
+
+信号路径只记录故障PC（arm64另取LR），最多2个地址；不在信号上下文运行 `backtrace()`。完整栈需系统崩溃报告。HTTP 200按逐条回执确认，401/403保留证据并按发送身份停采停发。

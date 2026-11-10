@@ -1,48 +1,84 @@
 import Foundation
 
-/// 客户端脱敏。服务端还会再过一遍，这里是第一道。
-public enum Redactor {
-    private static let secretQuery = try! NSRegularExpression(
-        pattern: "([?&](?:password|pwd|token|secret|api_key|apikey|authorization|sig|signature)=)[^&\\s]+",
-        options: [.caseInsensitive]
-    )
-    private static let url = try! NSRegularExpression(pattern: "https?://\\S+")
-    private static let container = try! NSRegularExpression(
-        pattern: "/var/mobile/Containers/Data/Application/[0-9A-Fa-f-]+"
-    )
-    private static let blob = try! NSRegularExpression(pattern: "[A-Za-z0-9+/_\\-]{32,}={0,2}")
+/// 先限制输入/遍历预算，再脱敏；不能为了截断 payload 先展开巨大共享对象图。
+enum Redactor {
+    private static let rules: [(NSRegularExpression, String)] = [
+        (#"(?i)\b(?:bearer)\s+[^\s,;]+"#, "Bearer ***"),
+        (#"(?i)((?<![A-Za-z0-9])(?:password|passwd|pwd|pass|token|secret|api[_-]?key|authorization|signature|sig|cookie|credential)\b\s*["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s&;,"']+)"#, "$1***"),
+        (#"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#, "[jwt]"),
+        (#"(?i)(?:https?|file|content)://[^\r\n]+"#, "[url]"),
+        (#"(?:/private)?/var/mobile/Containers/[^\r\n]+|/Users/[^\r\n]+|/private/var/[^\r\n]+"#, "~/[path]"),
+        (#"\b[0-9A-Fa-f]{32,}\b"#, "[blob]"),
+    ].map { (try! NSRegularExpression(pattern: $0.0), $0.1) }
+    private static let secretKey = try! NSRegularExpression(pattern: #"(?i)(password|passwd|pwd|token|secret|api[_-]?key|authorization|signature|cookie|credential)"#)
 
-    public static func scrub(_ value: String?) -> String? {
-        guard let value, !value.isEmpty else { return value }
-        var out = value
-        out = replace(secretQuery, in: out) { text, match in
-            let key = (text as NSString).substring(with: match.range(at: 1))
-            return key + "***"
+    static func scrub(_ value: String?) -> String? {
+        guard let value else { return nil }
+        var out = truncate(value, bytes: 32 * 1024)
+        for (regex, replacement) in rules {
+            out = regex.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: replacement)
         }
-        out = replace(url, in: out) { _, _ in "[url]" }
-        out = replace(container, in: out) { _, _ in "~" }
-        out = replace(blob, in: out) { _, _ in "[blob]" }
         return out
     }
 
-    private static func replace(
-        _ regex: NSRegularExpression,
-        in text: String,
-        transform: (String, NSTextCheckingResult) -> String
-    ) -> String {
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        let matches = regex.matches(in: text, options: [], range: range)
-        guard !matches.isEmpty else { return text }
+    static func truncate(_ value: String, bytes: Int) -> String {
+        if value.utf8.count <= bytes { return value }
+        var prefix = value.utf8.prefix(max(0, bytes))
+        while String(bytes: prefix, encoding: .utf8) == nil && !prefix.isEmpty { prefix = prefix.dropLast() }
+        return String(decoding: prefix, as: UTF8.self)
+    }
 
-        var result = ""
-        var cursor = text.startIndex
-        for match in matches {
-            guard let r = Range(match.range, in: text) else { continue }
-            result += text[cursor..<r.lowerBound]
-            result += transform(text, match)
-            cursor = r.upperBound
+    static func payload(_ values: [String: Any], dropped: Int = 0) -> [String: Any] {
+        var nodes = 128
+        var strings = 8 * 1024
+        var cleaned = value(values, depth: 0, nodes: &nodes, strings: &strings) as? [String: Any] ?? [:]
+        if dropped > 0 { cleaned["dropped"] = dropped }
+        guard let data = try? JSONSerialization.data(withJSONObject: cleaned), data.count <= 8 * 1024 else {
+            var fallback: [String: Any] = ["__truncated": "oversized"]
+            if dropped > 0 { fallback["dropped"] = dropped }
+            return fallback
         }
-        result += text[cursor...]
-        return result
+        return cleaned
+    }
+
+    private static func value(_ input: Any, depth: Int, nodes: inout Int, strings: inout Int) -> Any {
+        guard nodes > 0, strings > 0, depth <= 4 else { return "[truncated]" }
+        nodes -= 1
+        if let text = input as? String {
+            let out = scrub(truncate(text, bytes: min(strings, 2048))) ?? ""
+            strings -= out.utf8.count
+            return out
+        }
+        if input is NSNull { return NSNull() }
+        if let number = input as? NSNumber {
+            return number.doubleValue.isFinite ? number : NSNull()
+        }
+        if let object = input as? [String: Any] {
+            var result: [String: Any] = [:]
+            for (key, item) in object.prefix(16) {
+                guard nodes > 0, strings > 0 else { break }
+                let cleanKey = scrub(truncate(key, bytes: min(strings, 64))) ?? ""
+                strings -= cleanKey.utf8.count
+                let range = NSRange(key.startIndex..., in: key)
+                result[cleanKey] = secretKey.firstMatch(in: key, range: range) != nil ? "***" : value(item, depth: depth + 1, nodes: &nodes, strings: &strings)
+            }
+            return result
+        }
+        if let array = input as? [Any] {
+            var result: [Any] = []
+            for item in array.prefix(16) {
+                guard nodes > 0, strings > 0 else { break }
+                result.append(value(item, depth: depth + 1, nodes: &nodes, strings: &strings))
+            }
+            return result
+        }
+        // 任意对象的 description 可能含书名/凭据，也可能执行宿主代码。
+        return "[unsupported]"
+    }
+
+    static func screen(_ value: String) -> String? {
+        guard !value.isEmpty, value.utf8.count <= 64,
+              value.range(of: #"^[A-Za-z_][A-Za-z0-9_.]*$"#, options: .regularExpression) != nil else { return nil }
+        return value
     }
 }

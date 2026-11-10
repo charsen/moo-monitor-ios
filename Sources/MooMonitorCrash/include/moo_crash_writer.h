@@ -45,13 +45,16 @@ size_t moo_crash_read(const char *path, moo_crash_frame *out, size_t max);
 size_t moo_crash_read_last(const char *path, moo_crash_frame *out, size_t max);
 
 /* 清空崩溃文件（并入队列后调用）。 */
-void moo_crash_reset(const char *path);
+int moo_crash_reset(const char *path);
 
-/* 测试用：给定地址与 image 表算偏移；生产由 moo_crash_handle 内部调用。 */
+/* 兼容测试入口：无内核上下文时仅写信号，不伪造地址。 */
 void moo_crash_handle(int sig);
 
 /* NSException 已由 Swift 侧落盘：紧随其后的 SIGABRT 不再重复写一帧。 */
 void moo_crash_skip_signal_after_exception(void);
+
+/* 撤权后停采，但仍交还系统默认终止流程。 */
+void moo_crash_set_enabled(int enabled);
 
 #ifdef __cplusplus
 }

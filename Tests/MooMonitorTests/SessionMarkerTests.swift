@@ -40,6 +40,15 @@ final class SessionMarkerTests: XCTestCase {
         XCTAssertEqual(marker.begin(sessionId: "s2")?.state, "background")
     }
 
+    func testMalformedSessionTimesCannotBeUsedToInferTermination() {
+        let config = MonitorConfig(token: "fixture")
+        for (start, updated) in [(Int64.min, Int64.max), (Int64(100), Int64(1)), (Int64(0), Int64.max)] {
+            let state = SessionState(session_id: "old", started_at: start, updated_at: updated,
+                                     state: "foreground", release: "", build: "", screen: nil)
+            XCTAssertFalse(MooMonitor.shouldInferTermination(previous: state, hadCrash: false, config: config))
+        }
+    }
+
     func testTerminationInferenceRequiresForegroundSameBuildAndNoCrash() {
         let config = MonitorConfig(token: "t", app: "shuhe", release: "0.1.1", build: "12")
         let state = SessionState(
