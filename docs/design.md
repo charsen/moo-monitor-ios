@@ -35,7 +35,7 @@ iOS/iPadOS 17+、Swift 5.9+，SwiftPM 包；macOS 13+ 用于单测和原生子�
 | 致命信号 | SIGABRT/SEGV/BUS/ILL/FPE/TRAP | crash | sigaction + SA_SIGINFO；从内核上下文取 PC，arm64另取 LR；最多2个地址 |
 | 内存警告 | UIApplication.didReceiveMemoryWarning | low_memory | 每小时最多1条；不能当作真实 OOM |
 | 脏退出 | 下次启动的旧 session | termination | 同构建、旧 foreground 且无崩溃证据；原因 unknown |
-| 主动错误 | capture(error, kind:extras:) | handled / webview_gone | 由宿主显式接线，不自动扫描业务 |
+| 主动错误 | capture(error, kind:extras:) | handled / webview_gone | 显式接线；同实例同线程常规采集重入静默跳过，其他线程不共用闸 |
 | hang / MetricKit | 尚未实现 | — | 见 TODOS，不宣称已覆盖 |
 | 固定代码操作轨迹 | breadcrumb(type,name) | — | 最近30条，跨启动恢复，不生成独立事件 |
 
@@ -91,7 +91,7 @@ FrameResolver 每进程缓存一次当前 image 表；深度/index有上限，�
 - 401/403 保留队列、停采停发，C 信号路径也停止写监控帧。禁用标记绑定 endpoint/app/token 的SHA-256摘要，换构建本身不解除撤权，更换发送身份后恢复。
 - 400/413/415/422 仅确认当次发送的拒收记录；未知非成功、408、5xx、网络失败保留。
 - 429解析秒数/HTTP日期，持久化最早发送时间；常规 Retry-After 不缩短到一小时。异常超大值有十年上界。
-- 其它失败按30s/2m/8m/30m退避，最多6次；新进程可重开预算，但不提前突破尚未到期的服务端等待。
+- 其它失败按30s/2m/8m/30m退避，最多6次。新进程创建Uploader时，仅重置同一发送身份的持久化失败次数，保留nextAt/reason/identity；旧进程已耗尽预算也必须继续等待原截止时间。同一Uploader中的连续失败仍累计到上限，不能每次flush清零。不同发送身份仍按既有规则清除旧退避状态。
 - 进程内 Task.sleep 等待可以取消；后台任务过期会取消网络/等待并只结束一次系统 lease。没有 background URLSession，不承诺系统给予固定后台时间。
 - 按任务禁止 HTTP 跳转、不发送 cookie、不使用HTTP认证凭据；TLS仍使用系统默认验证。响应流最多读128KB，超限保留队列。
 
@@ -130,3 +130,9 @@ token注入沿用宿主现有脚本；Release不读取Debug运行时覆盖，不
 沿用最近30条t/type/name和breadcrumbs.json恢复路径。新入口相邻同标签合并，保留首次时间；重复时不重写持久文件，仅状态转换写入。既有addBreadcrumb入口保留重复出现语义，screen/生命周期原有去重规则保持。正常路径同步写盘仍存在，不承诺耗时上界或断电持久性。
 
 不生成独立事件、不改count/指纹/发送协议。参考[Sentry Cocoa Scope](https://github.com/getsentry/sentry-cocoa/blob/0af25456f7b31b89f61a7d9cc8d3ec63c6169ca2/Sources/Sentry/SentryScope.m)的有界快照与序列化开销控制，保留本库小容量结构；未接入其信号栈、MetricKit或hang实现。本轮未修改C、NSException处理器或信号安装，不增加崩溃覆盖声明。
+
+## 常规采集的重入保护
+
+CustomNSError/LocalizedError在桥接成NSError或读取描述时能执行宿主代码；该代码再次capture会制造额外事件。常规capture在桥接前以每实例唯一键进入Thread.threadDictionary保护，正常返回时defer清理。嵌套调用静默跳过，不输出可能再次接回采集的日志；其他线程不受影响，下一次正常调用或复用同一Error仍产生独立事件，不使用全局对象/hash去重。
+
+不在执行宿主属性期间持有SDK互斥锁。C信号、NSException、旧故障恢复和系统内存警告路径未改；它们不经过本次常规capture入口。普通错误属性仍同步执行，不提供属性执行超时或沙箱。规则借鉴[Sentry的重入隔离](https://github.com/getsentry/sentry-java/blob/812682636b45056f5fd9194b9c8320911d500230/sentry/src/main/java/io/sentry/util/SentryCallbackReentrancyGuard.java)；同时对照[Cocoa Client的前进程/fatal事件区分](https://github.com/getsentry/sentry-cocoa/blob/0af25456f7b31b89f61a7d9cc8d3ec63c6169ca2/Sources/Sentry/SentryClient.m)，保留本库独立恢复语义，没有移植其处理链。

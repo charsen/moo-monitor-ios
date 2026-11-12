@@ -133,6 +133,41 @@ final class UploaderTests: XCTestCase {
         XCTAssertTrue(StubProtocol.bodies.isEmpty)
     }
 
+    func testNewUploaderResetsAttemptsWithoutShorteningRetryAfter() async throws {
+        let identity = EventStore.identity(MonitorConfig(endpoint: "https://c.example.com", token: "tok"))
+        let deadline = Date().timeIntervalSince1970 + 7200
+        store.setRetryState(.init(attempts: 6, nextAt: deadline, reason: "429", identity: identity))
+        store.append(["event_id": "original"])
+        let current = uploader()
+        let outcome = await current.flush()
+        XCTAssertEqual(outcome, .retry("backoff"))
+        let state = try XCTUnwrap(store.retryState())
+        XCTAssertEqual(state.attempts, 0, "The next process must be able to wait without being mistaken for exhausted")
+        XCTAssertEqual(state.nextAt, deadline, accuracy: 0.001)
+        XCTAssertEqual(state.identity, identity)
+        XCTAssertEqual(state.reason, "429")
+        XCTAssertTrue(StubProtocol.bodies.isEmpty)
+        XCTAssertEqual(store.pending(limit: 10).first?["event_id"] as? String, "original")
+    }
+
+    func testNewProcessStartsFreshBudgetButSameUploaderAccumulatesFailures() async throws {
+        let identity = EventStore.identity(MonitorConfig(endpoint: "https://c.example.com", token: "tok"))
+        store.setRetryState(.init(attempts: 5, nextAt: Date().timeIntervalSince1970 - 1, reason: "http 503", identity: identity))
+        store.append(["event_id": "original"])
+        StubProtocol.status = 503
+        let current = uploader()
+        for expected in 1...6 {
+            if var state = store.retryState() { state.nextAt = Date().timeIntervalSince1970 - 1; store.setRetryState(state) }
+            let outcome = await current.flush()
+            XCTAssertEqual(outcome, .retry("http 503"))
+            XCTAssertEqual(store.retryState()?.attempts, expected)
+        }
+        let exhausted = await current.flush()
+        XCTAssertEqual(exhausted, .retry("exhausted"))
+        XCTAssertEqual(StubProtocol.bodies.count, 6)
+        XCTAssertEqual(store.pending(limit: 10).first?["event_id"] as? String, "original")
+    }
+
     func testOversizedResponseKeepsEvidence() async {
         store.append(["event_id": "a"])
         StubProtocol.responseBody = Data(repeating: 32, count: 128 * 1024 + 1)

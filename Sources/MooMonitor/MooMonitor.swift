@@ -14,6 +14,7 @@ public final class MooMonitor {
 
     private let stateLock = NSLock()
     private let breadcrumbLock = NSLock()
+    private let captureThreadKey = "MooMonitor.capture." + UUID().uuidString
     private var lastLifecycle: Bool?
     private var isInstalled = false
     private var config: MonitorConfig?
@@ -333,6 +334,13 @@ public final class MooMonitor {
     /// 业务主动上报（导入失败、同步失败、SQLite 错误等）。默认不采样，由调用点决定。
     public func capture(_ error: Error, kind: String = "handled", extras: [String: Any] = [:]) {
         guard ["handled", "webview_gone"].contains(kind), installed, let store else { return }
+        // NSError bridging can execute CustomNSError/LocalizedError getters.
+        // A per-thread gate avoids recursion without locking around host code or
+        // suppressing another thread. Native exception/signal paths bypass it.
+        let threadState = Thread.current.threadDictionary
+        guard threadState[captureThreadKey] == nil else { return }
+        threadState[captureThreadKey] = true
+        defer { threadState.removeObject(forKey: captureThreadKey) }
         var payload = extras
         let ns = error as NSError
         payload["domain"] = ns.domain

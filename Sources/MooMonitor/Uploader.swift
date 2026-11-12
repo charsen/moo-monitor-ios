@@ -20,8 +20,15 @@ actor Uploader {
         self.config = config
         self.store = store
         self.session = session
-        if let retry = store.retryState(), retry.identity != EventStore.identity(config) {
-            store.clearRetryState()
+        if var retry = store.retryState() {
+            if retry.identity != EventStore.identity(config) {
+                store.clearRetryState()
+            } else if retry.attempts != 0 {
+                // New process, fresh failure budget; preserve the absolute wait.
+                // Six old attempts otherwise also stop the facade awaiting it.
+                retry.attempts = 0
+                store.setRetryState(retry)
+            }
         }
         // 新进程可重新开始重试预算，但不能提前突破服务端尚未到期的 Retry-After。
     }
@@ -33,7 +40,6 @@ actor Uploader {
         defer { busy = false }
         guard !exhausted else { return .retry("exhausted") }
         if let retry = store.retryState(), retry.nextAt > Date().timeIntervalSince1970 { return .retry("backoff") }
-        if let retry = store.retryState(), retry.attempts >= Self.backoff.count { store.clearRetryState() }
 
         let base = config.endpoint.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(base)/api/v1/app-errors/intake") else { return .disabled }

@@ -1,5 +1,9 @@
 # NOTES
 
+- 2026-11-12：旧进程失败次数跨启动保留，会让新进程沿用已耗尽的预算并停止等待调度；创建新Uploader时重置同身份attempts，同时保留Retry-After绝对截止时间。进程内连续失败仍累计，不能借flush重开预算。
+
+- 2026-11-12：CustomNSError桥接及读取localizedDescription能执行宿主errorUserInfo/getter。常规capture需在桥接前设同实例同线程重入保护，不能持有SDK锁执行宿主属性，也不能用进程全局布尔值误挡其他线程。
+
 - 2026-11-12：固定代码breadcrumb入口的相邻重复不重写breadcrumbs.json；保留首次时间，状态转换仍写盘。旧addBreadcrumb入口保留重复出现语义，避免兼容性变更。
 
 已验证的事实、环境要求与坑。**只写已经发生的事**，计划写进 `TODOS.md`，设计写进 `docs/design.md`。
