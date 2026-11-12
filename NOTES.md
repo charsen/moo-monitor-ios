@@ -1,5 +1,7 @@
 # NOTES
 
+- 2026-11-12：固定代码breadcrumb入口的相邻重复不重写breadcrumbs.json；保留首次时间，状态转换仍写盘。旧addBreadcrumb入口保留重复出现语义，避免兼容性变更。
+
 已验证的事实、环境要求与坑。**只写已经发生的事**，计划写进 `TODOS.md`，设计写进 `docs/design.md`。
 
 ## 环境

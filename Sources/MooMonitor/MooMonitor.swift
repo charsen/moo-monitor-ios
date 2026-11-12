@@ -348,11 +348,31 @@ public final class MooMonitor {
         store.appendMerged(record)
     }
 
+    /// Fixed host code labels only, such as sync / reader.identity.ok. No values
+    /// or arbitrary request information; breadcrumbs do not create upload events.
+    public static func breadcrumb(_ type: String, _ name: String) { shared.breadcrumb(type, name) }
+
+    public func breadcrumb(_ type: String, _ name: String) {
+        guard type.utf8.count <= 16, name.utf8.count <= 64,
+              type.range(of: "^[a-z][a-z0-9_]*$", options: .regularExpression) == (type.startIndex..<type.endIndex),
+              name.range(of: "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*){1,5}$", options: .regularExpression) == (name.startIndex..<name.endIndex),
+              Redactor.scrub(name) == name else { return }
+        appendBreadcrumb(type, name, coalesce: true)
+    }
+
     public func addBreadcrumb(_ type: String, _ name: String) {
+        // Keep the existing entry point's occurrence semantics for consumers.
+        appendBreadcrumb(type, name, coalesce: false)
+    }
+
+    private func appendBreadcrumb(_ type: String, _ name: String, coalesce: Bool) {
         guard installed else { return }
         breadcrumbLock.lock(); defer { breadcrumbLock.unlock() }
         let entry = (at: Date(), type: String((Redactor.scrub(type) ?? "").prefix(16)), name: String((Redactor.scrub(name) ?? "").prefix(64)))
         stateLock.lock()
+        // Sync can repeat one request many times. Keep state transitions without
+        // rewriting the crash-recovery file for every identical adjacent entry.
+        if coalesce, let last = breadcrumbs.last, last.type == entry.type, last.name == entry.name { stateLock.unlock(); return }
         breadcrumbs.append(entry)
         if breadcrumbs.count > 30 {
             breadcrumbs.removeFirst(breadcrumbs.count - 30)

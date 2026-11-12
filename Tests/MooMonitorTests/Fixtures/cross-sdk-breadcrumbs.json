@@ -1,0 +1,57 @@
+[
+  {
+    "type": "sync",
+    "name": "reader.identity.ok",
+    "accepted": true
+  },
+  {
+    "type": "operation",
+    "name": "import.parse.failed",
+    "accepted": true
+  },
+  {
+    "type": "sync",
+    "name": "reader.identity.timeout",
+    "accepted": true
+  },
+  {
+    "type": "sync",
+    "name": "https://private.example/a?token=secret",
+    "accepted": false
+  },
+  {
+    "type": "sync",
+    "name": "private book title",
+    "accepted": false
+  },
+  {
+    "type": "sync",
+    "name": "reader.id.123",
+    "accepted": false
+  },
+  {
+    "type": "sync",
+    "name": "reader.ok\n",
+    "accepted": false
+  },
+  {
+    "type": "sync\n",
+    "name": "reader.ok",
+    "accepted": false
+  },
+  {
+    "type": "token=secret",
+    "name": "reader.ok",
+    "accepted": false
+  },
+  {
+    "type": "sync",
+    "name": "reader.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "accepted": false
+  },
+  {
+    "type": "sync",
+    "name": "reader.eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+    "accepted": false
+  }
+]

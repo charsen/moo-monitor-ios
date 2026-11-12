@@ -37,6 +37,7 @@ iOS/iPadOS 17+、Swift 5.9+，SwiftPM 包；macOS 13+ 用于单测和原生子�
 | 脏退出 | 下次启动的旧 session | termination | 同构建、旧 foreground 且无崩溃证据；原因 unknown |
 | 主动错误 | capture(error, kind:extras:) | handled / webview_gone | 由宿主显式接线，不自动扫描业务 |
 | hang / MetricKit | 尚未实现 | — | 见 TODOS，不宣称已覆盖 |
+| 固定代码操作轨迹 | breadcrumb(type,name) | — | 最近30条，跨启动恢复，不生成独立事件 |
 
 ### 3.1 信号路径
 
@@ -121,3 +122,11 @@ token注入沿用宿主现有脚本；Release不读取Debug运行时覆盖，不
 - 最多32个启动image、2个信号地址，没有完整栈/行号，动态后加载image不在缓存；NSException栈另有独立来源。
 - 进程扩展尚未适配UIApplication/后台lease，不支持多个采集库同时接管信号，不做跨进程共写。
 - 真机验证不能由Mac子进程或模拟器替代，性能单次样本不能作为p95或实际OOM成功率。
+
+## 固定代码操作轨迹（2026-11-12）
+
+新增`MooMonitor.breadcrumb(type, name)`静态与实例入口。type为1–16字节的小写ASCII代码标识符；name为最多64字节、2–6段点连接的同类标识符。必须整串匹配且脱敏前后相同；不接受URL、空白/换行、数字ID段、凭据、超长字符串。宿主只能传常量/白名单，不能用符合字形的业务数据冒充代码标签。
+
+沿用最近30条t/type/name和breadcrumbs.json恢复路径。新入口相邻同标签合并，保留首次时间；重复时不重写持久文件，仅状态转换写入。既有addBreadcrumb入口保留重复出现语义，screen/生命周期原有去重规则保持。正常路径同步写盘仍存在，不承诺耗时上界或断电持久性。
+
+不生成独立事件、不改count/指纹/发送协议。参考[Sentry Cocoa Scope](https://github.com/getsentry/sentry-cocoa/blob/0af25456f7b31b89f61a7d9cc8d3ec63c6169ca2/Sources/Sentry/SentryScope.m)的有界快照与序列化开销控制，保留本库小容量结构；未接入其信号栈、MetricKit或hang实现。本轮未修改C、NSException处理器或信号安装，不增加崩溃覆盖声明。
