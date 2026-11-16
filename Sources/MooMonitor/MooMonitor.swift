@@ -51,6 +51,7 @@ public final class MooMonitor {
         return screenValue
     }
 
+    private var metricKitObserver: AnyObject?
     private let runtimeHooks: Bool
     init(runtimeHooks: Bool = true) { self.runtimeHooks = runtimeHooks }
 
@@ -82,6 +83,7 @@ public final class MooMonitor {
         }
         store.clearDisabledStamp()
         stateLock.lock(); installedFlag = true; stateLock.unlock()
+        startMetricKit()
 
         // 先在普通上下文裁剪旧文件，再打开常驻fd；不能在handler里轮转。
         _ = store.prepareCrashFile()
@@ -108,6 +110,14 @@ public final class MooMonitor {
         if let previous, Self.shouldInferTermination(previous: previous, hadCrash: hadCrash, config: config) {
             let occurred = Date(timeIntervalSince1970: Double(previous.updated_at) / 1000)
             let duration = max(0, Double(previous.updated_at) - Double(previous.started_at))
+            let memFootprint = DeviceInfo.memoryFootprint()
+            let availMem = DeviceInfo.availableMemory()
+            let backgrounded = previous.state == SessionMarker.State.background.rawValue
+            var exitHint = "unknown"
+            if let avail = availMem, avail < 50 * 1024 * 1024 { exitHint = "memory_pressure_suspect" }
+            else if backgrounded { exitHint = "background_kill_suspect" }
+            let fgMs = previous.foreground_entered_at.map { max(0, previous.updated_at - $0) }
+            let bgMs = previous.background_entered_at.map { max(0, previous.updated_at - $0) }
             var record = buildRecord(
                 kind: "termination",
                 name: "unknown",
@@ -120,9 +130,15 @@ public final class MooMonitor {
                 breadcrumbOverride: previousBreadcrumbs,
                 extras: [
                     "reason": "unknown",
+                    "exit_hint": exitHint,
                     "session_state": previous.state,
                     "session_started_at": previous.started_at,
                     "duration_ms": Int(duration),
+                    "memory_footprint": memFootprint ?? -1,
+                    "available_memory": availMem ?? -1,
+                    "storage_free": DeviceInfo.storageFree() ?? -1,
+                    "foreground_ms": Int(fgMs ?? 0),
+                    "background_ms": Int(bgMs ?? 0),
                 ]
             )
             record["event_id"] = "termination-" + previous.session_id
@@ -234,6 +250,24 @@ public final class MooMonitor {
         }
     }
 
+    private func startMetricKit() {
+        #if os(iOS) && canImport(MetricKit)
+        if #available(iOS 14.0, *) {
+            guard metricKitObserver == nil else { return }
+            let observer = MetricKitObserver { [weak self] kind, name, message, extras in
+                self?.enqueueMetric(kind: kind, name: name, message: message, extras: extras)
+            }
+            observer.start()
+            metricKitObserver = observer
+        }
+        #endif
+    }
+    private func enqueueMetric(kind: String, name: String, message: String, extras: [String: Any]) {
+        guard installed else { return }
+        let record = buildRecord(kind: kind, name: name, message: message, stack: nil, frames: [],
+                                 screen: nil, fallbackToCurrentScreen: false, extras: extras, safeContext: true)
+        _ = enqueue(record)
+    }
     private func installMemoryObserver() {
         #if canImport(UIKit)
         guard memoryObserver == nil else { return }

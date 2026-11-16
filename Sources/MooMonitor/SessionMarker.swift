@@ -13,6 +13,10 @@ struct SessionState: Codable, Equatable {
     var env: String? = nil
     var device: [String: String]? = nil
     var screen: String?
+    /// 本次/上次前台进入时间（毫秒）；用于把异常终止归因到"前台存活时长"。
+    var foreground_entered_at: Int64? = nil
+    /// 最近一次进入后台的时间（毫秒）。
+    var background_entered_at: Int64? = nil
 }
 
 /// 会话标记文件 `<monitor>/session.json`。
@@ -79,6 +83,8 @@ final class SessionMarker {
         }
         current.state = state.rawValue
         current.updated_at = Int64(now.timeIntervalSince1970 * 1000)
+        if state == .foreground { current.foreground_entered_at = current.updated_at }
+        if state == .background { current.background_entered_at = current.updated_at }
         write(current)
     }
 
