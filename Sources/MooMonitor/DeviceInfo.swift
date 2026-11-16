@@ -48,6 +48,31 @@ enum DeviceInfo {
         }
     }
 
+    /// 进程物理内存占用（phys_footprint，字节）。取不到返回 nil。
+    static func memoryFootprint() -> Int? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { raw in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), raw, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return nil }
+        return Int(info.phys_footprint)
+    }
+    /// 当前进程可继续分配的内存（字节，iOS 13+）。
+    static func availableMemory() -> Int? {
+        #if os(iOS)
+        if #available(iOS 13.0, *) { return Int(os_proc_available_memory()) }
+        #endif
+        return nil
+    }
+    /// 设备剩余存储（字节）。
+    static func storageFree() -> Int? {
+        guard let n = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())[.systemFreeSize] as? NSNumber else { return nil }
+        return n.intValue
+    }
+
     static func context(installId: String, sessionId: String, screen: String?) -> [String: Any] {
         var out: [String: Any] = [
             "install_id": installId,
