@@ -118,10 +118,14 @@ public final class MooMonitor {
             else if backgrounded { exitHint = "background_kill_suspect" }
             let fgMs = previous.foreground_entered_at.map { max(0, previous.updated_at - $0) }
             let bgMs = previous.background_entered_at.map { max(0, previous.updated_at - $0) }
+            let memMB = memFootprint.map { $0 / 1_048_576 }
+            let availMB = availMem.map { $0 / 1_048_576 }
+            let memText = memMB.map { "\($0)MB" } ?? "?"
+            let availText = availMB.map { "\($0)MB" } ?? "?"
             var record = buildRecord(
                 kind: "termination",
                 name: "unknown",
-                message: "进程在前台消失，没有捕获到崩溃帧",
+                message: "进程在前台消失，疑似\(exitHint)（内存\(memText)/可用\(availText)）",
                 stack: nil,
                 frames: [],
                 occurredAt: occurred,
@@ -254,7 +258,7 @@ public final class MooMonitor {
         #if os(iOS) && canImport(MetricKit)
         if #available(iOS 14.0, *) {
             guard metricKitObserver == nil else { return }
-            let observer = MetricKitObserver { [weak self] kind, name, message, extras in
+            let observer = MetricKitObserver(appUUID: FrameResolver.mainExecutableUUIDHex()) { [weak self] kind, name, message, extras in
                 self?.enqueueMetric(kind: kind, name: name, message: message, extras: extras)
             }
             observer.start()

@@ -87,6 +87,13 @@ enum FrameResolver {
         }
     }
 
+    /// 主程序二进制 UUID（32 位小写 hex），供 MetricKit 帧标记 app=true。
+    static func mainExecutableUUIDHex() -> String? {
+        let bytes = currentMainExecutableUUID()
+        guard bytes.count == 16 else { return nil }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func currentMainExecutableUUID() -> [UInt8] {
         guard let header = _dyld_get_image_header(0) else { return [] }
         return imageUUID(header)

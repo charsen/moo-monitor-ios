@@ -12,8 +12,8 @@
 
 ## 后续能力
 
-- [ ] MetricKit订阅及与本地记录去重，单独验证分发渠道/系统授权条件。
+- [x] MetricKit 订阅（crash/hang/app_exit）；栈已解析为紧凑帧并做 OOM/watchdog 归因。仍需真机验证系统投递与本地记录去重。
 - [ ] capture的同步/SQLite接线：先限定可公开错误类别，不直接上传localizedDescription或业务数据。
 - [ ] hang watchdog，明确调试器/休眠边界。
-- [ ] dSYM上传与Mac atos辅助符号化，不能由当前最多2个信号地址宣称完整栈/行号。
+- [ ] dSYM 上传与服务端符号化（脚本 scripts/upload-dsyms.sh + 契约 docs/dsym-and-symbolication.md 已加；待服务端 intake）。本地即时定位用 scripts/symbolicate.sh。
 - [ ] App Extension适配、后加载image与其他崩溃采集器共存策略；当前不支持多进程共写/混装信号处理器。
