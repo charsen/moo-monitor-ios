@@ -8,10 +8,18 @@
 ## 上传
   MONITOR_TOKEN=... RELEASE=0.1.1 BUILD=27 APP=shuhe ./scripts/upload-dsyms.sh /path/ShuheApple.xcarchive
 
+<<<<<<< Updated upstream
 POST <endpoint>/api/v1/app-dsyms/intake
 - Header: Authorization: Bearer <客户端token>
 - multipart: app, release, build, sha256(整包), uuids(逗号分隔), archive(zip 内含 dSYMs/*.dSYM)
 - 幂等键建议: app+release+build+sha256
+=======
+POST <endpoint>/api/v1/app-errors/symbols   （能力 app_errors 或 app_symbols；业务要求原 app_errors token 可用）
+- Header: Authorization: Bearer <token>（也支持 body token）
+- multipart: platform=ios, release, build, kind=dsym, sha256, uuids(逗号分隔), files[]=@dSYM.zip
+- 云端只存档到私有盘并登记 app_error_symbols（project+platform+release+build+kind 覆盖式 upsert）。
+- 查询: POST <endpoint>/api/v1/app-errors/symbols/check（能力 app_errors，返回 exists/uuid/uuids/sha256）。
+>>>>>>> Stashed changes
 
 ## 服务端符号化
 - 按 frame.image_uuid 匹配已上传 dSYM；

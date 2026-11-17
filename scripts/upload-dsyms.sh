@@ -3,8 +3,12 @@ set -e
 [ $# -ge 1 ] || { echo "usage: upload-dsyms.sh <xcarchive>" >&2; exit 2; }
 SRC=$1
 ENDPOINT=$MONITOR_ENDPOINT; [ -n "$ENDPOINT" ] || ENDPOINT=https://c.mooeen.com
+<<<<<<< Updated upstream
 TOKEN=$MONITOR_TOKEN; [ -n "$TOKEN" ] || { echo "missing MONITOR_TOKEN" >&2; exit 2; }
 APP_NAME=$APP; [ -n "$APP_NAME" ] || APP_NAME=shuhe
+=======
+TOKEN=$MONITOR_TOKEN; [ -n "$TOKEN" ] || { echo "missing MONITOR_TOKEN（原 app_errors token 也可）" >&2; exit 2; }
+>>>>>>> Stashed changes
 REL=$RELEASE; BLD=$BUILD
 [ -n "$REL" ] || { echo "missing RELEASE" >&2; exit 2; }
 [ -n "$BLD" ] || { echo "missing BUILD" >&2; exit 2; }
