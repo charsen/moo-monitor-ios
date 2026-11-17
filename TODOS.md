@@ -16,6 +16,7 @@
 - [ ] capture的同步/SQLite接线：先限定可公开错误类别，不直接上传localizedDescription或业务数据。
 - [ ] hang watchdog，明确调试器/休眠边界。
 - [x] dSYM 上传（云端 M2：/api/v1/app-errors/symbols + app_symbols 能力，已实现测试）与本地 atos 脚本 scripts/symbolicate.sh。
-- [ ] Mac 侧 M3 批处理（拉未解析→atos→回写 src_frames）；云端不做服务端 iOS 符号化。
+- [x] Mac 侧批量符号化 CLI [`tools/SymbolicateApp`](tools/SymbolicateApp)（get_issue JSON + xcarchive/dSYM → dwarfdump/atos → JSON，未匹配标 unsymbolicated；含 fixture 与离线自测）。
+- [ ] 未解析帧的自动拉取与回写 src_frames：本轮只做本地批量符号化，不连云端拉取、不回写事件。
 - [ ] App Extension适配、后加载image与其他崩溃采集器共存策略；当前不支持多进程共写/混装信号处理器。
 - [ ] 服务端按 session+时间窗合并 SIGTRAP(signal) 与 metrickit_crash，避免同一崩溃双报；MetricKitAppExitMetric 为周期累计计数，云端展示/告警须标"累计"，如需单周期增量按 MetricKit 投递周期差分。
