@@ -15,6 +15,7 @@
 - [x] MetricKit 订阅（crash/hang/app_exit）；栈已解析为紧凑帧并做 OOM/watchdog 归因。仍需真机验证系统投递与本地记录去重。
 - [ ] capture的同步/SQLite接线：先限定可公开错误类别，不直接上传localizedDescription或业务数据。
 - [ ] hang watchdog，明确调试器/休眠边界。
-- [ ] dSYM 上传与服务端符号化（脚本 scripts/upload-dsyms.sh + 契约 docs/dsym-and-symbolication.md 已加；待服务端 intake）。本地即时定位用 scripts/symbolicate.sh。
+- [x] dSYM 上传（云端 M2：/api/v1/app-errors/symbols + app_symbols 能力，已实现测试）与本地 atos 脚本 scripts/symbolicate.sh。
+- [ ] Mac 侧 M3 批处理（拉未解析→atos→回写 src_frames）；云端不做服务端 iOS 符号化。
 - [ ] App Extension适配、后加载image与其他崩溃采集器共存策略；当前不支持多进程共写/混装信号处理器。
 - [ ] 服务端按 session+时间窗合并 SIGTRAP(signal) 与 metrickit_crash，避免同一崩溃双报；MetricKitAppExitMetric 为周期累计计数，云端展示/告警须标"累计"，如需单周期增量按 MetricKit 投递周期差分。
