@@ -23,7 +23,7 @@ final class MetricKitObserver: NSObject, MXMetricManagerSubscriber {
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
         for payload in payloads {
             for crash in payload.crashDiagnostics ?? [] {
-                let frames = MetricKitStackDecoder.frames(from: crash.callStackTree, limit: 64, appUUID: appUUID)
+                let frames = MetricKitStackDecoder.frames(from: crash.callStackTree, limit: 32, appUUID: appUUID)
                 let signal = int(crash.signal)
                 let exceptionType = int(crash.exceptionType)
                 let reason = crash.terminationReason ?? "-"
@@ -34,7 +34,7 @@ final class MetricKitObserver: NSObject, MXMetricManagerSubscriber {
             }
             for hang in payload.hangDiagnostics ?? [] {
                 let ms = Int(hang.hangDuration.converted(to: .milliseconds).value)
-                let frames = MetricKitStackDecoder.frames(from: hang.callStackTree, limit: 64, appUUID: appUUID)
+                let frames = MetricKitStackDecoder.frames(from: hang.callStackTree, limit: 32, appUUID: appUUID)
                 sink("termination", "metrickit_hang", "MetricKit hang duration_ms=\(ms)",
                      ["subtype": "hang", "duration_ms": ms, "frame_count": frames.count, "frames": frames])
             }

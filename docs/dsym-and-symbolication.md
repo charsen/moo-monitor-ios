@@ -2,7 +2,7 @@
 
 目标：把崩溃帧从 image_uuid+offset 还原成函数/行号。客户端已具备：
 - 信号崩溃帧（PC/LR，最多 2 帧，image_uuid+offset）；
-- MetricKit crash/hang 帧解析为紧凑帧（最多 64，image_uuid+offset），不再发送 32KB 原始 JSON（避免 Redactor 2KB/8KB 截断）；
+- MetricKit crash/hang 帧解析为紧凑帧（最多 32，image_uuid+offset），不再发送 32KB 原始 JSON（避免 Redactor 2KB/8KB 截断）；
 - 服务端可对两类帧用同一套 dSYM 符号化。
 
 ## 上传

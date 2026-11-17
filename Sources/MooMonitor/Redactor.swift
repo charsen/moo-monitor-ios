@@ -67,7 +67,14 @@ enum Redactor {
                 let cleanKey = truncate(scrub(key) ?? "", bytes: min(strings, 64))
                 strings -= cleanKey.utf8.count
                 let range = NSRange(key.startIndex..., in: key)
-                result[cleanKey] = secretKey.firstMatch(in: key, range: range) != nil ? "***" : value(item, depth: depth + 1, nodes: &nodes, strings: &strings)
+                // image/binary UUID 是符号化必需的不透明 ID，不是凭据；不能落入 32 位 hex 的 [blob] 规则。
+                if ["image_uuid", "binary_uuid"].contains(cleanKey), let text = item as? String {
+                    let out = truncate(text, bytes: min(strings, 64))
+                    strings -= out.utf8.count
+                    result[cleanKey] = out
+                } else {
+                    result[cleanKey] = secretKey.firstMatch(in: key, range: range) != nil ? "***" : value(item, depth: depth + 1, nodes: &nodes, strings: &strings)
+                }
             }
             return result
         }
