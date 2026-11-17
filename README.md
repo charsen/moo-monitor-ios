@@ -42,6 +42,7 @@ struct App: App {
 | [`AGENTS.md`](AGENTS.md) | 本仓协作与编码约束 |
 | [`NOTES.md`](NOTES.md) | 环境、验证边界、已知坑 |
 | [`TODOS.md`](TODOS.md) | 当前未完成事项 |
+| [`tools/SymbolicateApp/README.md`](tools/SymbolicateApp/README.md) | Mac 批量符号化 CLI：get_issue JSON + dSYM → symbol/file/line |
 | [`HANDOFF.md`](HANDOFF.md) | 本轮修复、测试与产物证据 |
 
 云端契约（数据表、指纹规则、count 语义、端点与能力）以 `moo-scaffold-cloud/docs/app-monitor.md` 为唯一来源，本仓不复制。

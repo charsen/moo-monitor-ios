@@ -1,0 +1,14 @@
+{
+  "issue": {
+    "key": "a1b2c3d4e5f6",
+    "type": "runtime",
+    "app": "shuhe",
+    "summary": "EXC_BAD_ACCESS (SIGSEGV)",
+    "frames": [
+      { "image_uuid": "6f7a8b9c-1d2e-3f40-8a9b-0c1d2e3f4a5b", "offset": 128040, "app": "ShuheApple" },
+      { "image_uuid": "00000000-0000-0000-0000-000000000000", "offset": 4096, "app": "UIKitCore" },
+      { "image_uuid": "6F7A8B9C-1D2E-3F40-8A9B-0C1D2E3F4A5B", "offset": "0x10000", "app": "ShuheApple" },
+      { "image_uuid": "6f7a8b9c-1d2e-3f40-8a9b-0c1d2e3f4a5b", "offset": 8192, "app": "ShuheApple" }
+    ]
+  }
+}

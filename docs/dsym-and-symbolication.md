@@ -15,7 +15,8 @@ POST <endpoint>/api/v1/app-errors/symbols   （能力 app_errors 或 app_symbols
 
 ## 符号化（Mac 侧，非服务端）
 - 云端明确不做服务端 iOS 符号化（生产 Linux 无 atos/dSYM 工具链），dSYM 仅存档。
-- Mac 上用 dSYM 本地还原：./scripts/symbolicate.sh <xcarchive> <uuid> <offset> arm64。
+- Mac 上用 dSYM 本地还原：./scripts/symbolicate.sh <xcarchive> <uuid> <offset> arm64（单帧）。
+- 批量：./tools/SymbolicateApp/symbolicate-app.sh <issue.json> <xcarchive|dSYMs> [--pretty]，逐帧输出 JSON 数组（保留 image_uuid/offset，新增 symbol/file/line，未匹配标 unsymbolicated）。
 - 地址 = __TEXT vmaddr(0x100000000) + offsetIntoBinaryTextSegment；支持信号帧与 MetricKit frames。
 
 ## 已知语义/服务端需处理
