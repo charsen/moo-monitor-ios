@@ -17,3 +17,4 @@
 - [ ] hang watchdog，明确调试器/休眠边界。
 - [ ] dSYM 上传与服务端符号化（脚本 scripts/upload-dsyms.sh + 契约 docs/dsym-and-symbolication.md 已加；待服务端 intake）。本地即时定位用 scripts/symbolicate.sh。
 - [ ] App Extension适配、后加载image与其他崩溃采集器共存策略；当前不支持多进程共写/混装信号处理器。
+- [ ] 服务端按 session+时间窗合并 SIGTRAP(signal) 与 metrickit_crash，避免同一崩溃双报；MetricKitAppExitMetric 为周期累计计数，云端展示/告警须标"累计"，如需单周期增量按 MetricKit 投递周期差分。

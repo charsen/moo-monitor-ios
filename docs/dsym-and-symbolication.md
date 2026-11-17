@@ -24,3 +24,7 @@ POST <endpoint>/api/v1/app-dsyms/intake
 
 ## 状态
 客户端解析与脚本已实现；服务端 intake/符号化端点待实现（当前上传会 404）。
+
+## 已知语义/服务端需处理
+- 同一崩溃可能同时产生信号崩溃(SIGTRAP…)与 metrickit_crash 两条事件：服务端应按 app+build+session+时间窗合并，避免双报。
+- metrickit_app_exit 的各计数是 MXAppExitMetric 的周期累计值：展示/告警必须标"累计"，不要把计数当单次事件次数；如需单周期增量，按 MetricKit 投递周期做差分。
