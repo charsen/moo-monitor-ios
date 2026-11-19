@@ -8,7 +8,7 @@
 #   MONITOR_TOKEN     必填，具备 app_errors 或 app_symbols 能力的 token（Authorization: Bearer）
 #   MONITOR_ENDPOINT  可选，默认 https://c.mooeen.com
 #   RELEASE           必填，营销版本号（如 0.1.1）
-#   BUILD             可选，构建号（如 27）
+#   BUILD             必填，构建号（如 27）。release+build 是云端定位符号的键，必填
 #
 # 用法：MONITOR_TOKEN=... RELEASE=0.1.1 BUILD=27 ./scripts/upload-dsyms.sh <xcarchive>
 set -eu
@@ -26,10 +26,29 @@ TOKEN=${MONITOR_TOKEN:-}
 REL=${RELEASE:-}
 [ -n "$REL" ] || die "missing RELEASE"
 BLD=${BUILD:-}
+[ -n "$BLD" ] || die "missing BUILD（release+build 是云端定位符号的键）"
 
 for bin in curl zip shasum dwarfdump python3; do
   command -v "$bin" >/dev/null 2>&1 || die "missing command: $bin"
 done
+
+# 错误回显脱敏：把 JSON 里 token/authorization/secret/password 类字段替换为 ***，避免把票据打日志。
+redact_file() {
+  python3 - "$1" <<'PY' 2>/dev/null || cat "$1" 2>/dev/null
+import json, sys
+SENS = ("token", "authorization", "secret", "password")
+def red(o):
+    if isinstance(o, dict):
+        return {k: ("***" if any(s in str(k).lower() for s in SENS) else red(v)) for k, v in o.items()}
+    if isinstance(o, list):
+        return [red(x) for x in o]
+    return o
+try:
+    print(json.dumps(red(json.load(open(sys.argv[1]))), ensure_ascii=False))
+except Exception:
+    sys.exit(1)
+PY
+}
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -65,16 +84,16 @@ print(json.dumps({
 }))
 PY
 
-HTTP=$(curl -sS -o "$TMP/ticket.json" -w '%{http_code}' \
+HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/ticket.json" -w '%{http_code}' \
   -X POST "$ENDPOINT/api/v1/uploads/tickets" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   --data-binary @"$TMP/ticket_req.json") || die "ticket request failed (network)"
-[ "$HTTP" = "200" ] || die "ticket HTTP $HTTP: $(cat "$TMP/ticket.json")"
+[ "$HTTP" = "200" ] || die "ticket HTTP $HTTP: $(redact_file "$TMP/ticket.json")"
 
 # 解析票据响应；缺字段直接失败，输出可读原因。
-python3 - "$TMP/ticket.json" "$TMP/ticket.vals" <<'PY' || die "invalid ticket response: $(cat "$TMP/ticket.json")"
+python3 - "$TMP/ticket.json" "$TMP/ticket.vals" <<'PY' || die "invalid ticket response: $(redact_file "$TMP/ticket.json")"
 import json, sys
 d = json.load(open(sys.argv[1]))
 if not d.get("ok"):
@@ -100,13 +119,13 @@ esac
 echo "ticket upload_id=$UPLOAD_ID region=$REGION host=$UPLOAD_HOST"
 
 # 2) 直传七牛：文件字节只经过本机 -> 七牛，不经过 cloud。成功返回 {key,hash}。
-HTTP=$(curl -sS -o "$TMP/qiniu.json" -w '%{http_code}' \
+HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/qiniu.json" -w '%{http_code}' \
   -X POST "$UPLOAD_HOST" \
   -F "token=$QTOKEN" \
   -F "key=$KEY" \
   -F "file=@$ZIP;type=application/zip") || die "qiniu upload failed (network)"
-[ "$HTTP" = "200" ] || die "qiniu HTTP $HTTP: $(cat "$TMP/qiniu.json")"
-python3 - "$TMP/qiniu.json" <<'PY' || die "qiniu rejected upload: $(cat "$TMP/qiniu.json")"
+[ "$HTTP" = "200" ] || die "qiniu HTTP $HTTP: $(redact_file "$TMP/qiniu.json")"
+python3 - "$TMP/qiniu.json" <<'PY' || die "qiniu rejected upload: $(redact_file "$TMP/qiniu.json")"
 import json, sys
 d = json.load(open(sys.argv[1]))
 if d.get("error"):
@@ -121,14 +140,14 @@ python3 - "$UUIDS" > "$TMP/confirm_req.json" <<'PY'
 import json, sys
 print(json.dumps({"uuids": [u for u in sys.argv[1].split(",") if u]}))
 PY
-HTTP=$(curl -sS -o "$TMP/confirm.json" -w '%{http_code}' \
+HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/confirm.json" -w '%{http_code}' \
   -X POST "$ENDPOINT/api/v1/uploads/$UPLOAD_ID/confirm" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   --data-binary @"$TMP/confirm_req.json") || die "confirm request failed (network)"
-[ "$HTTP" = "200" ] || die "confirm HTTP $HTTP: $(cat "$TMP/confirm.json")"
-python3 - "$TMP/confirm.json" <<'PY' || die "confirm rejected: $(cat "$TMP/confirm.json")"
+[ "$HTTP" = "200" ] || die "confirm HTTP $HTTP: $(redact_file "$TMP/confirm.json")"
+python3 - "$TMP/confirm.json" <<'PY' || die "confirm rejected: $(redact_file "$TMP/confirm.json")"
 import json, sys
 d = json.load(open(sys.argv[1]))
 if not d.get("ok"):
