@@ -25,6 +25,19 @@ final class MetricKitStackTests: XCTestCase {
         XCTAssertEqual(frames.count, 1)
         XCTAssertEqual(frames[0]["app"] as? Bool, true)
     }
+    func testSkipsMalformedUUIDAndOffsetBeforeEncodingTopLevelFrames() throws {
+        let goodUUID = "aaaaaaaa-1111-2222-3333-444444444444"
+        let roots: [[String: Any]] = [
+            ["binaryUUID": "not-a-uuid", "offsetIntoBinaryTextSegment": 2],
+            ["binaryUUID": goodUUID, "offsetIntoBinaryTextSegment": -1],
+            ["binaryUUID": goodUUID, "offsetIntoBinaryTextSegment": 15],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: ["callStacks": [["callStackRootFrames": roots]]])
+        let frames = MetricKitStackDecoder.frames(fromJSON: data)
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames.first?["offset"] as? Int, 15)
+    }
+
     func testInvalidJSONYieldsEmpty() {
         XCTAssertTrue(MetricKitStackDecoder.frames(fromJSON: Data("not json".utf8)).isEmpty)
     }

@@ -137,6 +137,65 @@ final class RecoveryTests: XCTestCase {
         XCTAssertEqual(record["kind"] as? String, "termination")
         XCTAssertEqual(record["severity"] as? String, "warning")
         XCTAssertEqual((record["context"] as? [String: Any])?["session_id"] as? String, "previous")
+        XCTAssertNil((record["payload"] as? [String: Any])?["memory_footprint"])
+    }
+
+    func testDelayedMetricKitReportKeepsItsOwnBuildTimeAndAllFrames() throws {
+        let dir = try directory()
+        let config = MonitorConfig(token: "fixture", release: "current", build: "42")
+        let monitor = MooMonitor(runtimeHooks: false)
+        monitor.install(config, directory: dir)
+        monitor.setScreen("CurrentReaderView")
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let period = DateInterval(start: start, duration: 60)
+        let frames: [[String: Any]] = (0..<32).map { ["image_uuid": "aaaaaaaa111122223333444444444444", "offset": $0] }
+        monitor.enqueueMetric(MetricKitReport(kind: "crash", name: "metrickit_crash", message: "fixture",
+                                             period: period, release: "old", build: "8", frames: frames,
+                                             device: ["os_version": "old-os"], extras: ["frame_count": frames.count]))
+        monitor.enqueueMetric(MetricKitReport(kind: "termination", name: "metrickit_app_exit", message: "mixed builds",
+                                             period: period, release: nil, build: nil,
+                                             extras: ["multiple_application_versions": true]))
+        let records = EventStore(directory: dir, config: config).pending(limit: 10)
+        XCTAssertEqual(records.count, 2)
+        let report = try XCTUnwrap(records.first)
+        XCTAssertEqual(report["release"] as? String, "old")
+        XCTAssertEqual(report["build"] as? String, "8")
+        XCTAssertEqual(report["occurred_at"] as? String, ISO8601DateFormatter.moo.string(from: period.end))
+        XCTAssertEqual((report["frames"] as? [[String: Any]])?.count, 32)
+        XCTAssertEqual((report["frames"] as? [[String: Any]])?.last?["offset"] as? Int, 31)
+        XCTAssertEqual((report["device"] as? [String: String])?["os_version"], "old-os")
+        let payload = try XCTUnwrap(report["payload"] as? [String: Any])
+        XCTAssertEqual(payload["report_started_at"] as? String, ISO8601DateFormatter.moo.string(from: start))
+        XCTAssertEqual(payload["timestamp_source"] as? String, "report_window_end")
+        XCTAssertNil(payload["frames"])
+        let context = try XCTUnwrap(report["context"] as? [String: Any])
+        XCTAssertNotNil(context["install_id"])
+        XCTAssertNil(context["session_id"])
+        XCTAssertNil(context["foreground"])
+        XCTAssertNil(report["breadcrumbs"])
+        XCTAssertNil(records.last?["release"])
+        XCTAssertNil(records.last?["build"])
+    }
+
+    func testTerminationUsesOnlyPreviousMemoryObservationAndKeepsCauseUnknown() throws {
+        let dir = try directory()
+        let config = MonitorConfig(token: "fixture")
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let sampledAt = Int64(started.timeIntervalSince1970 * 1000) + 10_000
+        let marker = SessionMarker(directory: dir, config: config, device: ["model": "previous-device"])
+        _ = marker.begin(sessionId: "previous", now: started)
+        marker.mark(.foreground, now: started)
+        marker.markMemory(SessionMemorySample(at: sampledAt, footprint: 64 * 1024 * 1024, available: 1024))
+        MooMonitor(runtimeHooks: false).install(config, directory: dir)
+        let record = try XCTUnwrap(EventStore(directory: dir, config: config).pending(limit: 10).first)
+        let payload = try XCTUnwrap(record["payload"] as? [String: Any])
+        XCTAssertEqual(payload["exit_hint"] as? String, "unknown")
+        XCTAssertEqual(payload["memory_sampled_at"] as? Int64, sampledAt)
+        XCTAssertEqual(payload["memory_footprint"] as? Int, 64 * 1024 * 1024)
+        XCTAssertEqual(payload["available_memory"] as? Int, 1024)
+        XCTAssertNil(payload["storage_free"])
+        XCTAssertNil((record["context"] as? [String: Any])?["storage_free"])
+        XCTAssertEqual((record["device"] as? [String: String])?["model"], "previous-device")
     }
 
     func testMalformedSessionTimeIsIgnoredWithoutCrashingHost() throws {

@@ -34,9 +34,9 @@ iOS/iPadOS 17+、Swift 5.9+，SwiftPM 包；macOS 13+ 用于单测和原生子�
 | ObjC 异常 | NSSetUncaughtExceptionHandler | crash | 独立 exception.json；写成功后抑制随后的重复信号记录；调用此前 handler |
 | 致命信号 | SIGABRT/SEGV/BUS/ILL/FPE/TRAP | crash | sigaction + SA_SIGINFO；从内核上下文取 PC，arm64另取 LR；最多2个地址 |
 | 内存警告 | UIApplication.didReceiveMemoryWarning | low_memory | 每小时最多1条；不能当作真实 OOM |
-| 脏退出 | 下次启动的旧 session | termination | 同构建、旧 foreground 且无崩溃证据；原因 unknown |
+| 脏退出 | 下次启动的旧 session | termination | 同构建、旧 foreground 且无崩溃证据。原因 unknown，可附上一会话实际记录的内存样本时间与数值 |
 | 主动错误 | capture(error, kind:extras:) | handled / webview_gone | 显式接线；同实例同线程常规采集重入静默跳过，其他线程不共用闸 |
-| hang / MetricKit | 尚未实现 | — | 见 TODOS，不宣称已覆盖 |
+| MetricKit | 系统订阅回调 | crash / termination | 崩溃和卡顿最多 32 帧进入顶层 frames。版本和构建取报告元数据，事件时间取报告窗口结束，并保留窗口边界。跨版本退出累计不指定版本或构建 |
 | 固定代码操作轨迹 | breadcrumb(type,name) | — | 最近30条，跨启动恢复，不生成独立事件 |
 
 ### 3.1 信号路径
@@ -92,7 +92,7 @@ FrameResolver 每进程缓存一次当前 image 表；深度/index有上限，�
 - 400/413/415/422 仅确认当次发送的拒收记录；未知非成功、408、5xx、网络失败保留。
 - 429解析秒数/HTTP日期，持久化最早发送时间；常规 Retry-After 不缩短到一小时。异常超大值有十年上界。
 - 其它失败按30s/2m/8m/30m退避，最多6次。新进程创建Uploader时，仅重置同一发送身份的持久化失败次数，保留nextAt/reason/identity；旧进程已耗尽预算也必须继续等待原截止时间。同一Uploader中的连续失败仍累计到上限，不能每次flush清零。不同发送身份仍按既有规则清除旧退避状态。
-- 进程内 Task.sleep 等待可以取消；后台任务过期会取消网络/等待并只结束一次系统 lease。没有 background URLSession，不承诺系统给予固定后台时间。
+- 后台任务过期会取消该后台窗口的网络请求或等待，并结束系统 lease。重新进入前台会在旧任务退出后恢复待发队列，沿用持久化的 Retry-After 与进程内失败预算。没有 background URLSession，实际后台时长由系统决定。
 - 按任务禁止 HTTP 跳转、不发送 cookie、不使用HTTP认证凭据；TLS仍使用系统默认验证。响应流最多读128KB，超限保留队列。
 
 ## 6. 脱敏与身份
@@ -109,7 +109,7 @@ install_id 为专用 Keychain 随机UUID的SHA-256，Keychain不可用时读写�
 
 Xcode 本地 package 为 `../moo-monitor-ios`。`MonitorBridge` 从构建产物读取 token/版本，最早安装；仅 active/实际 background 转发生命周期，inactive 不冒充 background。关键视图只传固定名称。
 
-导入错误只上传固定区域与错误码，不转发原始 localizedDescription/userInfo；WebKit 进程终止记录 webview_gone，不将普通导航失败误标为进程退出。同步/SQLite新增业务接线仍见 TODOS。
+导入错误只上传固定区域与错误码。WebKit 进程终止记录 webview_gone。同步面包屑通过固定代码入口采集，相邻同标签请求共用一条记录。
 
 token注入沿用宿主现有脚本；Release不读取Debug运行时覆盖，不改现有版本/构建号。
 
@@ -118,7 +118,7 @@ token注入沿用宿主现有脚本；Release不读取Debug运行时覆盖，不
 - `swift test`：队列、恢复、逐条回执、并发、退避、脱敏、帧边界及独立原生崩溃子进程。
 - `tools/device-qa/generate.py` 生成独立Bundle ID的测试App；`run.py --device ... --host <Mac LAN IP>` 使用本机Laravel与独立SQLite、伪造外呼。必须由用户授权真机测试后才执行；脚本只操作该测试包。
 - 宿主真实WK终止/阅读恢复的定向hosted证据与产物见宿主BUILD，设备结论见NOTES/HANDOFF。
-- 采不到SDK安装前、SIGKILL、系统watchdog/OOM的直接回调；termination只有unknown推断，上滑强杀也可能先写background而不记。
+- SDK 安装前的事件、SIGKILL、系统 watchdog/OOM 无直接回调。脏退出推断仅使用上次标记，上滑强杀可能先写后台标记。MetricKit 可随后投递系统报告，其时间窗口和接收会话无法精确对应。
 - 最多32个启动image、2个信号地址，没有完整栈/行号，动态后加载image不在缓存；NSException栈另有独立来源。
 - 进程扩展尚未适配UIApplication/后台lease，不支持多个采集库同时接管信号，不做跨进程共写。
 - 真机验证不能由Mac子进程或模拟器替代，性能单次样本不能作为p95或实际OOM成功率。

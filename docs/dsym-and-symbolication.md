@@ -19,6 +19,7 @@
    - JSON: `{uuids:[...]}`（iOS dSYM 必填）；返回 `ok=true` 即完成。
 
 - 云端只签票据、登记并核验对象大小/SHA-256（project+platform+release+build+kind 覆盖式 upsert），不接收文件字节。
+- 上传脚本的错误日志只记录阶段、状态码和固定解析错误。Cloud 请求头和七牛上传票据从私有临时文件传给 curl。
 - region → 上传域名：z0→upload.qiniup.com；z1/z2/na0/as0→upload-<region>.qiniup.com。
 - 查询是否已有某 release 符号: `POST <endpoint>/api/v1/app-errors/symbols/check`（只读，能力 app_errors，返回 exists/uuid/uuids/sha256）。
 
@@ -29,5 +30,5 @@
 - 地址 = __TEXT vmaddr(0x100000000) + offsetIntoBinaryTextSegment；支持信号帧与 MetricKit frames。
 
 ## 已知语义/服务端需处理
-- 同一崩溃可能同时产生信号崩溃(SIGTRAP…)与 metrickit_crash 两条事件：服务端应按 app+build+session+时间窗合并，避免双报。
+- 同一崩溃可能同时产生信号崩溃(SIGTRAP…)与 metrickit_crash 两条事件：MetricKit 提供构建和报告时间窗口。延迟报告的接收会话不能作为匹配依据，精确去重仍待服务端处理。
 - metrickit_app_exit 的各计数是 MXAppExitMetric 的周期累计值：展示/告警必须标"累计"，不要把计数当单次事件次数；如需单周期增量，按 MetricKit 投递周期做差分。

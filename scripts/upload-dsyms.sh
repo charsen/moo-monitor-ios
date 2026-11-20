@@ -32,26 +32,12 @@ for bin in curl zip shasum dwarfdump python3; do
   command -v "$bin" >/dev/null 2>&1 || die "missing command: $bin"
 done
 
-# 错误回显脱敏：把 JSON 里 token/authorization/secret/password 类字段替换为 ***，避免把票据打日志。
-redact_file() {
-  python3 - "$1" <<'PY' 2>/dev/null || cat "$1" 2>/dev/null
-import json, sys
-SENS = ("token", "authorization", "secret", "password")
-def red(o):
-    if isinstance(o, dict):
-        return {k: ("***" if any(s in str(k).lower() for s in SENS) else red(v)) for k, v in o.items()}
-    if isinstance(o, list):
-        return [red(x) for x in o]
-    return o
-try:
-    print(json.dumps(red(json.load(open(sys.argv[1]))), ensure_ascii=False))
-except Exception:
-    sys.exit(1)
-PY
-}
-
+# 响应体可能含票据或鉴权信息。日志仅记录请求阶段、HTTP 状态和固定解析错误。
+umask 077
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+printf 'Authorization: Bearer %s\n' "$TOKEN" > "$TMP/cloud-headers"
+unset TOKEN MONITOR_TOKEN
 ZIP="$TMP/dsyms.zip"
 NAME="dsyms.zip"
 
@@ -84,55 +70,54 @@ print(json.dumps({
 }))
 PY
 
-HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/ticket.json" -w '%{http_code}' \
+HTTP=$(curl -q -s --connect-timeout 30 --max-time 600 -o "$TMP/ticket.json" -w '%{http_code}' \
   -X POST "$ENDPOINT/api/v1/uploads/tickets" \
-  -H "Authorization: Bearer $TOKEN" \
+  --header @"$TMP/cloud-headers" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   --data-binary @"$TMP/ticket_req.json") || die "ticket request failed (network)"
-[ "$HTTP" = "200" ] || die "ticket HTTP $HTTP: $(redact_file "$TMP/ticket.json")"
+[ "$HTTP" = "200" ] || die "ticket HTTP $HTTP"
 
-# 解析票据响应；缺字段直接失败，输出可读原因。
-python3 - "$TMP/ticket.json" "$TMP/ticket.vals" <<'PY' || die "invalid ticket response: $(redact_file "$TMP/ticket.json")"
-import json, sys
-d = json.load(open(sys.argv[1]))
-if not d.get("ok"):
-    raise SystemExit("ticket not ok: %r" % (d,))
-lines = []
-for key in ("upload_id", "key", "region", "token"):
-    v = d.get(key)
-    if v in (None, ""):
-        raise SystemExit("ticket missing %s: %r" % (key, d))
-    lines.append(str(v))
-open(sys.argv[2], "w").write("\n".join(lines) + "\n")
-PY
+# 只把经过形状检查的字段交给 shell。解析器不输出原始异常或响应。
+python3 - "$TMP" <<'PYTICKET' 2>/dev/null || die "invalid ticket response"
+import json, pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+d = json.loads((root / "ticket.json").read_text())
+if not isinstance(d, dict) or d.get("ok") is not True:
+    sys.exit(1)
+upload_id, key, region, token = (d.get(name) for name in ("upload_id", "key", "region", "token"))
+if not all(isinstance(v, str) and v and v.isprintable() for v in (upload_id, key, region, token)):
+    sys.exit(1)
+if not re.fullmatch(r"[A-Za-z0-9_-]+", upload_id) or not re.fullmatch(r"[a-z0-9]+", region):
+    sys.exit(1)
+(root / "ticket.vals").write_text("\n".join((upload_id, key, region)) + "\n")
+(root / "qiniu-token").write_text(token)
+PYTICKET
 
-# 逐行读取，避免 token 里的特殊字符被 shell 再解释。
-{ read -r UPLOAD_ID; read -r KEY; read -r REGION; read -r QTOKEN; } < "$TMP/ticket.vals"
+{ read -r UPLOAD_ID; read -r KEY; read -r REGION; } < "$TMP/ticket.vals"
 
 # region -> 七牛上传域名：z0 无后缀，其余带区域后缀。
 case "$REGION" in
   z0)            UPLOAD_HOST="https://upload.qiniup.com" ;;
   z1|z2|na0|as0) UPLOAD_HOST="https://upload-$REGION.qiniup.com" ;;
-  *) die "unsupported qiniu region: $REGION" ;;
+  *) die "unsupported qiniu region" ;;
 esac
 echo "ticket upload_id=$UPLOAD_ID region=$REGION host=$UPLOAD_HOST"
 
 # 2) 直传七牛：文件字节只经过本机 -> 七牛，不经过 cloud。成功返回 {key,hash}。
-HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/qiniu.json" -w '%{http_code}' \
+HTTP=$(curl -q -s --connect-timeout 30 --max-time 600 -o "$TMP/qiniu.json" -w '%{http_code}' \
   -X POST "$UPLOAD_HOST" \
-  -F "token=$QTOKEN" \
-  -F "key=$KEY" \
+  -F "token=<$TMP/qiniu-token" \
+  --form-string "key=$KEY" \
   -F "file=@$ZIP;type=application/zip") || die "qiniu upload failed (network)"
-[ "$HTTP" = "200" ] || die "qiniu HTTP $HTTP: $(redact_file "$TMP/qiniu.json")"
-python3 - "$TMP/qiniu.json" <<'PY' || die "qiniu rejected upload: $(redact_file "$TMP/qiniu.json")"
+[ "$HTTP" = "200" ] || die "qiniu HTTP $HTTP"
+python3 - "$TMP/qiniu.json" "$KEY" <<'PYQINIU' 2>/dev/null || die "qiniu rejected upload"
 import json, sys
-d = json.load(open(sys.argv[1]))
-if d.get("error"):
-    raise SystemExit(d["error"])
-if not d.get("hash") or not d.get("key"):
-    raise SystemExit("missing key/hash: %r" % (d,))
-PY
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+if not isinstance(d, dict) or d.get("error") or not d.get("hash") or d.get("key") != sys.argv[2]:
+    sys.exit(1)
+PYQINIU
 echo "qiniu upload ok"
 
 # 3) 确认：云端核验对象大小/SHA-256 后登记符号；dSYM 必须带 uuids。
@@ -140,18 +125,19 @@ python3 - "$UUIDS" > "$TMP/confirm_req.json" <<'PY'
 import json, sys
 print(json.dumps({"uuids": [u for u in sys.argv[1].split(",") if u]}))
 PY
-HTTP=$(curl -sS --connect-timeout 30 --max-time 600 -o "$TMP/confirm.json" -w '%{http_code}' \
+HTTP=$(curl -q -s --connect-timeout 30 --max-time 600 -o "$TMP/confirm.json" -w '%{http_code}' \
   -X POST "$ENDPOINT/api/v1/uploads/$UPLOAD_ID/confirm" \
-  -H "Authorization: Bearer $TOKEN" \
+  --header @"$TMP/cloud-headers" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   --data-binary @"$TMP/confirm_req.json") || die "confirm request failed (network)"
-[ "$HTTP" = "200" ] || die "confirm HTTP $HTTP: $(redact_file "$TMP/confirm.json")"
-python3 - "$TMP/confirm.json" <<'PY' || die "confirm rejected: $(redact_file "$TMP/confirm.json")"
+[ "$HTTP" = "200" ] || die "confirm HTTP $HTTP"
+python3 - "$TMP/confirm.json" "$UPLOAD_ID" <<'PYCONFIRM' 2>/dev/null || die "confirm rejected"
 import json, sys
-d = json.load(open(sys.argv[1]))
-if not d.get("ok"):
-    raise SystemExit(json.dumps(d, ensure_ascii=False))
-PY
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+if not isinstance(d, dict) or d.get("ok") is not True or str(d.get("upload_id")) != sys.argv[2]:
+    sys.exit(1)
+PYCONFIRM
 
 echo "done: dSYM uploaded and confirmed (upload_id=$UPLOAD_ID)"

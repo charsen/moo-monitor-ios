@@ -81,6 +81,26 @@ final class UploaderTests: XCTestCase {
         )
     }
 
+    func testForegroundResumesQueuedUploadWithoutBreakingPersistedRetryAfter() async {
+        let config = MonitorConfig(endpoint: "https://c.example.com", token: "tok", app: "shuhe")
+        store.append(["event_id": "waiting"])
+        let nextAt = Date().timeIntervalSince1970 + 0.5
+        store.setRetryState(.init(attempts: 2, nextAt: nextAt, reason: "429", identity: EventStore.identity(config)))
+        let monitor = MooMonitor(runtimeHooks: false, uploadSession: session)
+        monitor.install(config, directory: store.dir)
+        monitor.enterForeground()
+        monitor.enterBackground()
+        let sent = expectation(description: "foreground schedules upload")
+        StubProtocol.onRequest = {
+            XCTAssertGreaterThanOrEqual(Date().timeIntervalSince1970, nextAt)
+            sent.fulfill()
+        }
+        monitor.enterForeground()
+        await fulfillment(of: [sent], timeout: 3)
+        await monitor.flush()
+        XCTAssertTrue(EventStore(directory: store.dir, config: config).pending(limit: 1).isEmpty)
+    }
+
     func testAppendDuringSendIsNotAcknowledgedAsPartOfOldBatch() async {
         store.append(["event_id": "a"])
         var once = false

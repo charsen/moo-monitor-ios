@@ -16,6 +16,7 @@ public final class MooMonitor {
     private let breadcrumbLock = NSLock()
     private let captureThreadKey = "MooMonitor.capture." + UUID().uuidString
     private var lastLifecycle: Bool?
+    private var backgroundWindow: UUID?
     private var isInstalled = false
     private var config: MonitorConfig?
     private var store: EventStore?
@@ -53,7 +54,12 @@ public final class MooMonitor {
 
     private var metricKitObserver: AnyObject?
     private let runtimeHooks: Bool
-    init(runtimeHooks: Bool = true) { self.runtimeHooks = runtimeHooks }
+    private let uploadSession: URLSession
+
+    init(runtimeHooks: Bool = true, uploadSession: URLSession = .shared) {
+        self.runtimeHooks = runtimeHooks
+        self.uploadSession = uploadSession
+    }
 
     // MARK: - 安装
 
@@ -71,7 +77,7 @@ public final class MooMonitor {
         let store = directory.map { EventStore(directory: $0, config: config) } ?? EventStore.forApp(config: config)
         self.config = config
         self.store = store
-        self.uploader = Uploader(config: config, store: store)
+        self.uploader = Uploader(config: config, store: store, session: uploadSession)
         self.deviceSnapshot = DeviceInfo.device()
         self.session = SessionMarker(directory: store.dir, config: config, device: deviceSnapshot.compactMapValues { $0 as? String })
         self.installId = DeviceInfo.installId(fallbackDirectory: store.dir)
@@ -83,7 +89,6 @@ public final class MooMonitor {
         }
         store.clearDisabledStamp()
         stateLock.lock(); installedFlag = true; stateLock.unlock()
-        startMetricKit()
 
         // 先在普通上下文裁剪旧文件，再打开常驻fd；不能在handler里轮转。
         _ = store.prepareCrashFile()
@@ -110,52 +115,48 @@ public final class MooMonitor {
         if let previous, Self.shouldInferTermination(previous: previous, hadCrash: hadCrash, config: config) {
             let occurred = Date(timeIntervalSince1970: Double(previous.updated_at) / 1000)
             let duration = max(0, Double(previous.updated_at) - Double(previous.started_at))
-            let memFootprint = DeviceInfo.memoryFootprint()
-            let availMem = DeviceInfo.availableMemory()
-            let backgrounded = previous.state == SessionMarker.State.background.rawValue
-            var exitHint = "unknown"
-            if let avail = availMem, avail < 50 * 1024 * 1024 { exitHint = "memory_pressure_suspect" }
-            else if backgrounded { exitHint = "background_kill_suspect" }
-            let fgMs = previous.foreground_entered_at.map { max(0, previous.updated_at - $0) }
-            let bgMs = previous.background_entered_at.map { max(0, previous.updated_at - $0) }
-            let memMB = memFootprint.map { $0 / 1_048_576 }
-            let availMB = availMem.map { $0 / 1_048_576 }
-            let memText = memMB.map { "\($0)MB" } ?? "?"
-            let availText = availMB.map { "\($0)MB" } ?? "?"
+            let fgMs = previous.foreground_entered_at.map { max(0, Double(previous.updated_at) - Double($0)) }
+            var extras: [String: Any] = [
+                "reason": "unknown",
+                "exit_hint": "unknown",
+                "session_state": previous.state,
+                "session_started_at": previous.started_at,
+                "duration_ms": Int(duration),
+                "foreground_ms": Int(min(fgMs ?? 0, duration)),
+                "timestamp_source": "last_session_marker",
+            ]
+            // This is a past observation. It cannot establish the cause of the exit.
+            if let memory = previous.memory, (previous.started_at...previous.updated_at).contains(memory.at) {
+                extras["memory_sampled_at"] = memory.at
+                extras["memory_footprint"] = memory.footprint
+                extras["available_memory"] = memory.available
+            }
             var record = buildRecord(
                 kind: "termination",
                 name: "unknown",
-                message: "进程在前台消失，疑似\(exitHint)（内存\(memText)/可用\(availText)）",
+                message: "进程在前台消失，原因未知",
                 stack: nil,
                 frames: [],
                 occurredAt: occurred,
                 screen: previous.screen,
                 fallbackToCurrentScreen: false,
                 breadcrumbOverride: previousBreadcrumbs,
-                extras: [
-                    "reason": "unknown",
-                    "exit_hint": exitHint,
-                    "session_state": previous.state,
-                    "session_started_at": previous.started_at,
-                    "duration_ms": Int(duration),
-                    "memory_footprint": memFootprint ?? -1,
-                    "available_memory": availMem ?? -1,
-                    "storage_free": DeviceInfo.storageFree() ?? -1,
-                    "foreground_ms": Int(fgMs ?? 0),
-                    "background_ms": Int(bgMs ?? 0),
-                ]
+                extras: extras
             )
             record["event_id"] = "termination-" + previous.session_id
             var context = record["context"] as? [String: Any] ?? [:]
             context["session_id"] = previous.session_id
+            context["foreground"] = true
+            context["storage_free"] = nil
             record["context"] = context
+            record["device"] = previous.device
             enqueue(record)
         }
 
         drainExceptionFile()
         drainCrashFrames(frames, previous: previous, breadcrumbs: previousBreadcrumbs)
         _ = session?.begin(sessionId: sessionId)
-        if runtimeHooks { installMemoryObserver() }
+        if runtimeHooks { installMemoryObserver(); startMetricKit() }
         addBreadcrumb("lifecycle", "launch")
         if runtimeHooks { scheduleStartupFlush() }
     }
@@ -256,22 +257,33 @@ public final class MooMonitor {
 
     private func startMetricKit() {
         #if os(iOS) && canImport(MetricKit)
-        if #available(iOS 14.0, *) {
-            guard metricKitObserver == nil else { return }
-            let observer = MetricKitObserver(appUUID: FrameResolver.mainExecutableUUIDHex()) { [weak self] kind, name, message, extras in
-                self?.enqueueMetric(kind: kind, name: name, message: message, extras: extras)
-            }
-            observer.start()
-            metricKitObserver = observer
+        guard metricKitObserver == nil, let config else { return }
+        let observer = MetricKitObserver(config: config, appUUID: FrameResolver.mainExecutableUUIDHex()) { [weak self] report in
+            self?.enqueueMetric(report)
         }
+        metricKitObserver = observer
+        observer.start()
         #endif
     }
-    private func enqueueMetric(kind: String, name: String, message: String, extras: [String: Any]) {
+
+    func enqueueMetric(_ report: MetricKitReport) {
         guard installed else { return }
-        let record = buildRecord(kind: kind, name: name, message: message, stack: nil, frames: [],
-                                 screen: nil, fallbackToCurrentScreen: false, extras: extras, safeContext: true)
+        var extras = report.extras
+        extras["report_started_at"] = ISO8601DateFormatter.moo.string(from: report.period.start)
+        extras["report_ended_at"] = ISO8601DateFormatter.moo.string(from: report.period.end)
+        extras["timestamp_source"] = "report_window_end"
+        // Cloud consumes top-level frames. The generic payload budget clips arrays.
+        var record = buildRecord(kind: report.kind, name: report.name, message: report.message, stack: nil,
+                                 frames: report.frames, occurredAt: report.period.end, fallbackToCurrentScreen: false,
+                                 breadcrumbOverride: [], extras: extras, safeContext: true)
+        record["release"] = report.release.flatMap { Redactor.scrub($0).map { Redactor.truncate($0, bytes: 64) } }
+        record["build"] = report.build.flatMap { Redactor.scrub($0).map { Redactor.truncate($0, bytes: 32) } }
+        record["device"] = report.device.mapValues { Redactor.truncate(Redactor.scrub($0) ?? "", bytes: 64) }
+        // A delayed report has no proven relationship to the receiving app session.
+        record["context"] = ["install_id": installId]
         _ = enqueue(record)
     }
+
     private func installMemoryObserver() {
         #if canImport(UIKit)
         guard memoryObserver == nil else { return }
@@ -294,10 +306,16 @@ public final class MooMonitor {
         guard installed else { return }
         stateLock.lock()
         guard lastLifecycle != true else { stateLock.unlock(); return }
+        let resumesBackground = lastLifecycle == false
         lastLifecycle = true; cachedForeground = true
-        session?.mark(.foreground)
+        backgroundWindow = nil
+        let now = Date()
+        session?.mark(.foreground, now: now, memory: SessionMemorySample.capture(now: now))
         stateLock.unlock()
         addBreadcrumb("lifecycle", "foreground")
+        if resumesBackground {
+            Task { [weak self] in await self?.flushOnForeground() }
+        }
     }
 
     public func enterBackground() {
@@ -305,21 +323,39 @@ public final class MooMonitor {
         stateLock.lock()
         guard lastLifecycle != false else { stateLock.unlock(); return }
         lastLifecycle = false; cachedForeground = false
+        let window = UUID()
+        backgroundWindow = window
         session?.mark(.background)
         stateLock.unlock()
         addBreadcrumb("lifecycle", "background")
+        guard runtimeHooks else { return }
         #if canImport(UIKit)
-        DispatchQueue.main.async { [weak self] in self?.flushInBackground() }
+        DispatchQueue.main.async { [weak self] in self?.flushInBackground(window: window) }
         #else
         Task { [weak self] in await self?.flush() }
         #endif
     }
 
+    private func flushOnForeground() async {
+        guard let task = currentFlushTask() else { return }
+        await task.value
+        // If the preceding background window cancelled in-flight work, its task
+        // must exit before we ask the same uploader to resume with its saved wait.
+        if task.isCancelled && isForeground() { await flush() }
+    }
+
+    private func isForeground() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return lastLifecycle == true
+    }
+
     #if canImport(UIKit)
-    @MainActor private func flushInBackground() {
+    @MainActor private func flushInBackground(window: UUID) {
+        stateLock.lock(); let current = backgroundWindow == window; stateLock.unlock()
+        guard current else { return }
         let lease = BackgroundLease()
         lease.identifier = UIApplication.shared.beginBackgroundTask(withName: "MooMonitor.flush") { [weak self, weak lease] in
-            self?.cancelFlush()
+            self?.expireBackgroundFlush(window: window)
             lease?.end()
         }
         Task { [weak self] in
@@ -328,9 +364,11 @@ public final class MooMonitor {
         }
     }
 
-    private func cancelFlush() {
-        stateLock.lock(); let task = flushTask; stateLock.unlock()
-        task?.cancel()
+    private func expireBackgroundFlush(window: UUID) {
+        stateLock.lock(); defer { stateLock.unlock() }
+        // An older lease can expire after the app returned to the foreground.
+        guard backgroundWindow == window else { return }
+        flushTask?.cancel()
     }
     #endif
 
@@ -340,6 +378,7 @@ public final class MooMonitor {
         if let last = lastMemoryWarning, now - last < 3600 { stateLock.unlock(); return }
         lastMemoryWarning = now
         stateLock.unlock()
+        if let memory = SessionMemorySample.capture(now: Date()) { session?.markMemory(memory) }
         addBreadcrumb("lifecycle", "memory_warning")
         enqueue(buildRecord(
             kind: "low_memory",

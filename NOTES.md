@@ -12,7 +12,7 @@
 
 - Xcode 15+（iOS 17 SDK），Swift 5.9。
 - `swift build` / `swift test` 可在命令行跑；真机验证需要签名与设备。
-- MetricKit 数据只在 App Store / TestFlight 分发的包上才有，Debug 侧载基本收不到。
+- MetricKit 投递的时机与报告类型由系统决定。iPhone 13 上开发签名侧载的 Debug QA 包已收到实际崩溃诊断。周期指标和生产分发场景需要各自验证。
 
 ## 已证实（2026-11-09，书禾 Apple 模拟器闭环）
 
@@ -28,6 +28,12 @@
 
 - iPhone 13 独立 QA 包的 fatalError、强制解包 nil、NSException 均完成采集、下次启动恢复与本机 Laravel 入库；三个系统报告的 Bundle ID、版本、二进制 UUID 均匹配，保留故障线程栈及 NSException Backtrace。证据见 [HANDOFF](HANDOFF.md)，iPad 与其他边界见 [TODOS](TODOS.md)。
 - QA 包缺少 scene 配置或在 UIApplication.active 之前请求本地端点，会被本地网络权限拦截且本机收不到请求；补 scene 并等 active 后正常。该问题在测试夹具修复，未更改系统安全策略。
+
+## 真机复验（2026-11-20）
+
+- iPhone 13 / iOS 26.6.2 上，`fatalError` 后的首次复启同时恢复了本地 SIGTRAP 和系统投递的 `metrickit_crash`。原生记录携带旧会话和准确故障时间，MetricKit 记录携带系统报告窗口及独立栈帧。验收脚本需要分别识别两个来源，服务端去重见 [TODOS](TODOS.md)。
+- 独立 QA 包通过本机 Laravel intake 验证了前台恢复发送、脱敏、分批、部分回执、Retry-After、503 后跨重启保留事件 ID、401 后换令牌恢复。通过合成 MetricKit 报告验证顶层帧及来源 build 入库，接收进程的会话不会添到报告上。
+- 独立离线 QA 的 `fatalError`、强制解包 `nil`、`NSException` 在重启后均写入队列，再次启动保留原事件 ID。三份系统 `.ips` 与实际二进制 UUID、包名和版本一致，保留故障线程栈和 NSException 回溯。系统诊断和原生恢复记录可同时出现。
 
 ## 已知边界
 

@@ -17,6 +17,19 @@ struct SessionState: Codable, Equatable {
     var foreground_entered_at: Int64? = nil
     /// 最近一次进入后台的时间（毫秒）。
     var background_entered_at: Int64? = nil
+    var memory: SessionMemorySample? = nil
+}
+
+struct SessionMemorySample: Codable, Equatable {
+    var at: Int64
+    var footprint: Int?
+    var available: Int?
+
+    static func capture(now: Date) -> Self? {
+        let footprint = DeviceInfo.memoryFootprint(), available = DeviceInfo.availableMemory()
+        guard footprint != nil || available != nil else { return nil }
+        return Self(at: Int64(now.timeIntervalSince1970 * 1000), footprint: footprint, available: available)
+    }
 }
 
 /// 会话标记文件 `<monitor>/session.json`。
@@ -64,7 +77,7 @@ final class SessionMarker {
     }
 
     /// 前台/后台切换。只更新状态与时间；进程随时可能在这里之后被杀。
-    func mark(_ state: State, now: Date = Date()) {
+    func mark(_ state: State, now: Date = Date(), memory: SessionMemorySample? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard var current = read() else {
             // 标记文件丢了（清理/首次安装）：补一个本进程的标记，不推断历史。
@@ -77,7 +90,8 @@ final class SessionMarker {
                 build: config.build,
                 env: config.env,
                 device: device,
-                screen: nil
+                screen: nil,
+                memory: memory
             ))
             return
         }
@@ -85,6 +99,15 @@ final class SessionMarker {
         current.updated_at = Int64(now.timeIntervalSince1970 * 1000)
         if state == .foreground { current.foreground_entered_at = current.updated_at }
         if state == .background { current.background_entered_at = current.updated_at }
+        if let memory { current.memory = memory }
+        write(current)
+    }
+
+    func markMemory(_ memory: SessionMemorySample) {
+        lock.lock(); defer { lock.unlock() }
+        guard var current = read() else { return }
+        current.memory = memory
+        current.updated_at = max(current.updated_at, memory.at)
         write(current)
     }
 

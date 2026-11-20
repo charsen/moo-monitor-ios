@@ -15,20 +15,26 @@ enum MetricKitStackDecoder {
         guard let stack = chosen, let roots = stack["callStackRootFrames"] as? [[String: Any]] else { return [] }
         var out: [[String: Any]] = []
         out.reserveCapacity(limit)
-        func walk(_ nodes: [[String: Any]]) {
+        var visited = 0
+        func walk(_ nodes: [[String: Any]], depth: Int) {
+            guard depth < 128 else { return }
             for node in nodes {
-                if out.count >= limit { return }
+                guard out.count < limit, visited < 1024 else { return }
+                visited += 1
                 if let uuid = node["binaryUUID"] as? String,
-                   let offset = node["offsetIntoBinaryTextSegment"] as? Int {
+                   let offset = node["offsetIntoBinaryTextSegment"] as? Int, offset >= 0 {
                     let hex = uuid.replacingOccurrences(of: "-", with: "").lowercased()
-                    var entry: [String: Any] = ["image_uuid": hex, "offset": offset]
-                    if let appUUID { entry["app"] = (hex == appUUID) }
-                    out.append(entry)
+                    // These typed frames bypass the generic payload redactor.
+                    if hex.utf8.count == 32, hex.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+                        var entry: [String: Any] = ["image_uuid": hex, "offset": offset]
+                        if let appUUID { entry["app"] = (hex == appUUID) }
+                        out.append(entry)
+                    }
                 }
-                if let sub = node["subFrames"] as? [[String: Any]] { walk(sub) }
+                if let sub = node["subFrames"] as? [[String: Any]] { walk(sub, depth: depth + 1) }
             }
         }
-        walk(roots)
+        walk(roots, depth: 0)
         return out
     }
 }
