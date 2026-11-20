@@ -177,6 +177,22 @@ final class RecoveryTests: XCTestCase {
         XCTAssertNil(records.last?["build"])
     }
 
+    func testMetricKitExitHintsSkipNormalOnlyReportsAndKeepBackgroundFailures() {
+        func hint(_ memory: Bool = false, _ watchdog: Bool = false, _ abnormal: Bool = false,
+                  pressure: Bool = false, cpu: Bool = false, timeout: Bool = false, locked: Bool = false) -> String? {
+            MetricKitExitHint.classify(memory: memory, watchdog: watchdog, abnormal: abnormal, memoryPressure: pressure,
+                                       cpuLimit: cpu, backgroundTimeout: timeout, suspendedWithLockedFile: locked)
+        }
+        XCTAssertNil(hint())
+        XCTAssertEqual(hint(true, true), "oom_suspect")
+        XCTAssertEqual(hint(false, true), "watchdog_suspect")
+        XCTAssertEqual(hint(false, false, true), "crash_suspect")
+        XCTAssertEqual(hint(pressure: true), "background_memory_pressure")
+        XCTAssertEqual(hint(cpu: true), "background_cpu_limit")
+        XCTAssertEqual(hint(timeout: true), "background_task_timeout")
+        XCTAssertEqual(hint(locked: true), "background_suspended_with_locked_file")
+    }
+
     func testTerminationUsesOnlyPreviousMemoryObservationAndKeepsCauseUnknown() throws {
         let dir = try directory()
         let config = MonitorConfig(token: "fixture")

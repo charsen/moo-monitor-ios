@@ -14,6 +14,22 @@ struct MetricKitReport {
     var extras: [String: Any] = [:]
 }
 
+/// A normal-only or empty aggregate does not belong in the issue stream.
+/// Background memory pressure is distinct from exceeding the process limit.
+enum MetricKitExitHint {
+    static func classify(memory: Bool, watchdog: Bool, abnormal: Bool, memoryPressure: Bool,
+                         cpuLimit: Bool, backgroundTimeout: Bool, suspendedWithLockedFile: Bool) -> String? {
+        if memory { return "oom_suspect" }
+        if watchdog { return "watchdog_suspect" }
+        if abnormal { return "crash_suspect" }
+        if memoryPressure { return "background_memory_pressure" }
+        if cpuLimit { return "background_cpu_limit" }
+        if backgroundTimeout { return "background_task_timeout" }
+        if suspendedWithLockedFile { return "background_suspended_with_locked_file" }
+        return nil
+    }
+}
+
 #if os(iOS) && canImport(MetricKit)
 import MetricKit
 
@@ -82,12 +98,15 @@ final class MetricKitObserver: NSObject, MXMetricManagerSubscriber {
             let fg = exit.foregroundExitData, bg = exit.backgroundExitData
             let memory = fg.cumulativeMemoryResourceLimitExitCount + bg.cumulativeMemoryResourceLimitExitCount
             let watchdog = fg.cumulativeAppWatchdogExitCount + bg.cumulativeAppWatchdogExitCount
-            let abnormal = fg.cumulativeBadAccessExitCount + fg.cumulativeIllegalInstructionExitCount + fg.cumulativeAbnormalExitCount
-            let hint: String
-            if memory > 0 { hint = "oom_suspect" }
-            else if watchdog > 0 { hint = "watchdog_suspect" }
-            else if abnormal > 0 { hint = "crash_suspect" }
-            else { hint = "normal" }
+            let abnormal = fg.cumulativeBadAccessExitCount + fg.cumulativeIllegalInstructionExitCount +
+                fg.cumulativeAbnormalExitCount + bg.cumulativeBadAccessExitCount + bg.cumulativeIllegalInstructionExitCount +
+                bg.cumulativeAbnormalExitCount
+            guard let hint = MetricKitExitHint.classify(
+                memory: memory > 0, watchdog: watchdog > 0, abnormal: abnormal > 0,
+                memoryPressure: bg.cumulativeMemoryPressureExitCount > 0, cpuLimit: bg.cumulativeCPUResourceLimitExitCount > 0,
+                backgroundTimeout: bg.cumulativeBackgroundTaskAssertionTimeoutExitCount > 0,
+                suspendedWithLockedFile: bg.cumulativeSuspendedWithLockedFileExitCount > 0
+            ) else { continue }
             // Cumulative totals spanning an update cannot be assigned to a single build.
             let mixed = payload.includesMultipleApplicationVersions
             sink(MetricKitReport(kind: "termination", name: "metrickit_app_exit",
@@ -107,7 +126,13 @@ final class MetricKitObserver: NSObject, MXMetricManagerSubscriber {
                                           "bg_normal": bg.cumulativeNormalAppExitCount,
                                           "bg_memory": bg.cumulativeMemoryResourceLimitExitCount,
                                           "bg_watchdog": bg.cumulativeAppWatchdogExitCount,
-                                          "bg_cpu": bg.cumulativeCPUResourceLimitExitCount]))
+                                          "bg_cpu": bg.cumulativeCPUResourceLimitExitCount,
+                                          "bg_bad_access": bg.cumulativeBadAccessExitCount,
+                                          "bg_abnormal": bg.cumulativeAbnormalExitCount,
+                                          "bg_illegal_instruction": bg.cumulativeIllegalInstructionExitCount,
+                                          "bg_memory_pressure": bg.cumulativeMemoryPressureExitCount,
+                                          "bg_task_timeout": bg.cumulativeBackgroundTaskAssertionTimeoutExitCount,
+                                          "bg_suspended_locked_file": bg.cumulativeSuspendedWithLockedFileExitCount]))
         }
     }
 }

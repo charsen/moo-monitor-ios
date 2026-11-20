@@ -1,5 +1,7 @@
 # NOTES
 
+- 2026-11-20：书禾 Apple 0.1.1(31) 的 Cloud `metrickit_app_exit` 曾把仅正常退出的系统聚合上报成 termination。空或仅正常退出的报告现在跳过异常队列，后台内存压力、进程内存上限和其他受限退出分别保留。macOS 定向测试及 arm64 iOS SDK 编译通过。
+
 - 2026-11-12：旧进程失败次数跨启动保留，会让新进程沿用已耗尽的预算并停止等待调度；创建新Uploader时重置同身份attempts，同时保留Retry-After绝对截止时间。进程内连续失败仍累计，不能借flush重开预算。
 
 - 2026-11-12：CustomNSError桥接及读取localizedDescription能执行宿主errorUserInfo/getter。常规capture需在桥接前设同实例同线程重入保护，不能持有SDK锁执行宿主属性，也不能用进程全局布尔值误挡其他线程。

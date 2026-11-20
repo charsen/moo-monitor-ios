@@ -36,7 +36,7 @@ iOS/iPadOS 17+、Swift 5.9+，SwiftPM 包；macOS 13+ 用于单测和原生子�
 | 内存警告 | UIApplication.didReceiveMemoryWarning | low_memory | 每小时最多1条；不能当作真实 OOM |
 | 脏退出 | 下次启动的旧 session | termination | 同构建、旧 foreground 且无崩溃证据。原因 unknown，可附上一会话实际记录的内存样本时间与数值 |
 | 主动错误 | capture(error, kind:extras:) | handled / webview_gone | 显式接线；同实例同线程常规采集重入静默跳过，其他线程不共用闸 |
-| MetricKit | 系统订阅回调 | crash / termination | 崩溃和卡顿最多 32 帧进入顶层 frames。版本和构建取报告元数据，事件时间取报告窗口结束，并保留窗口边界。跨版本退出累计不指定版本或构建 |
+| MetricKit | 系统订阅回调 | crash / termination | 崩溃和卡顿最多 32 帧进入顶层 frames。仅正常退出或无异常计数的指标不生成问题。后台内存压力与进程达到内存上限分别记录。版本和构建取报告元数据，事件时间取报告窗口结束，并保留窗口边界。跨版本退出累计不指定版本或构建 |
 | 固定代码操作轨迹 | breadcrumb(type,name) | — | 最近30条，跨启动恢复，不生成独立事件 |
 
 ### 3.1 信号路径
